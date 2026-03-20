@@ -1,0 +1,114 @@
+//类特点：成员变量粗分类、存储参数，成员函数负责从json文件读取参数
+#include "params.h"
+namespace mpcc{
+CostParam::CostParam(){
+    std::cout << "Default initialization of cost" << std::endl;
+}
+
+CostParam::CostParam(std::string file){
+    /////////////////////////////////////////////////////
+    // Loading Cost Parameters //////////////////////////
+    /////////////////////////////////////////////////////
+    std::ifstream iCost(file);
+    json jsonCost;
+    iCost >> jsonCost;
+    q_l          = jsonCost["q_l"];
+    q_c          = jsonCost["q_c"];
+    q_v          = jsonCost["q_v"];
+    q_a          = jsonCost["q_a"];
+}
+
+BoundsParam::BoundsParam() {
+    std::cout << "Default initialization of bounds" << std::endl;
+}
+
+BoundsParam::BoundsParam(std::string file) {
+    /////////////////////////////////////////////////////
+    // Loading Bounds Parameters //////////////////////////
+    /////////////////////////////////////////////////////
+    std::ifstream iBounds(file);
+    json jsonBounds;
+    iBounds >> jsonBounds;
+    //命名规定：在json文件变量命名中，本身没有“_”  !!!
+    lower_state_bounds.px_l = jsonBounds["px_l"];
+    lower_state_bounds.py_l = jsonBounds["py_l"];
+    lower_state_bounds.pz_l = jsonBounds["pz_l"];
+    lower_state_bounds.vx_l = jsonBounds["vx_l"];
+    lower_state_bounds.vy_l = jsonBounds["vy_l"];
+    lower_state_bounds.vz_l = jsonBounds["vz_l"];
+
+    upper_state_bounds.px_u = jsonBounds["px_u"];
+    upper_state_bounds.py_u = jsonBounds["py_u"];
+    upper_state_bounds.pz_u = jsonBounds["pz_u"];
+    upper_state_bounds.vx_u = jsonBounds["vx_u"];
+    upper_state_bounds.vy_u = jsonBounds["vy_u"];
+    upper_state_bounds.vz_u = jsonBounds["vz_u"];
+
+    lower_input_bounds.ax_l = jsonBounds["ax_l"];
+    lower_input_bounds.ay_l = jsonBounds["ay_l"];
+    lower_input_bounds.az_l = jsonBounds["az_l"];
+    
+    upper_input_bounds.ax_u = jsonBounds["ax_u"];
+    upper_input_bounds.ay_u = jsonBounds["ay_u"];
+    upper_input_bounds.az_u = jsonBounds["az_u"];
+}
+
+NormalizationParam::NormalizationParam(){
+    std::cout << "Default initialization of normalization" << std::endl;
+}
+
+NormalizationParam::NormalizationParam(std::string file)
+{
+    /////////////////////////////////////////////////////
+    // Loading Normalization Parameters /////////////////
+    /////////////////////////////////////////////////////
+    std::ifstream iNorm(file);
+    json jsonNorm;
+    iNorm >> jsonNorm;
+    T_x.setIdentity();
+    T_x(si_index.px,si_index.px) = jsonNorm["px"];
+    T_x(si_index.py,si_index.py) = jsonNorm["py"];
+    T_x(si_index.pz,si_index.pz) = jsonNorm["pz"];
+    T_x(si_index.vx,si_index.vx) = jsonNorm["vx"];
+    T_x(si_index.vy,si_index.vy) = jsonNorm["vy"];
+    T_x(si_index.vz,si_index.vz) = jsonNorm["vz"];
+    T_x_inv.setIdentity();
+    for(int i = 0;i<NX;i++)
+    {
+        T_x_inv(i,i) = 1.0/T_x(i,i);
+    }
+    T_u.setIdentity();
+    T_u(si_index.ax,si_index.ax) = jsonNorm["ax"];
+    T_u(si_index.ay,si_index.ay) = jsonNorm["ay"];
+    T_u(si_index.az,si_index.az) = jsonNorm["az"];
+    T_u_inv.setIdentity();
+    for(int i = 0;i<NU;i++)
+    {
+        T_u_inv(i,i) = 1.0/T_u(i,i);
+    }
+    T_s.setIdentity();
+    T_s_inv.setIdentity();
+}
+
+InitialParam::InitialParam(){
+    std::cout << "Default initialization of initial State" << std::endl;
+}
+InitialParam::InitialParam(std::string file){
+    std::ifstream iNorm(file);
+    json jsonNorm;
+    iNorm >> jsonNorm;
+    Pos_target_init.x() = jsonNorm["pxt_init"];
+    Pos_target_init.y() = jsonNorm["pyt_init"];
+    Pos_target_init.z() = jsonNorm["pzt_init"];
+    Vel_target_init.x() = jsonNorm["vxt_init"];
+    Vel_target_init.y() = jsonNorm["vyt_init"];
+    Vel_target_init.z() = jsonNorm["vzt_init"];
+
+    Pos_self_init.x() = jsonNorm["pxs_init"];
+    Pos_self_init.y() = jsonNorm["pys_init"];
+    Pos_self_init.z() = jsonNorm["pzs_init"];
+    Vel_self_init.x() = jsonNorm["vxs_init"];
+    Vel_self_init.y() = jsonNorm["vys_init"];
+    Vel_self_init.z() = jsonNorm["vzs_init"];
+}
+}
