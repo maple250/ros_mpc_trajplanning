@@ -27,9 +27,9 @@ find_package(Python3 COMPONENTS Development NumPy REQUIRED)
 # ==========================================
 include_directories(
     .
-    ${catkin_INCLUDE_DIRS} 
-    External/blasfeo/include        # 注意：标准安装通常是 include 而不是 lib/include
-    External/hpipm/include
+    ${catkin_INCLUDE_DIRS}
+    External/blasfeo/lib/include    # install.sh 将 blasfeo 装到 External/blasfeo/lib，头文件在其 include/ 下（扁平）
+    External/hpipm/lib/include      # 同理，hpipm 装到 External/hpipm/lib
     External/matplotlib
     External/Eigen
     External/Json/include

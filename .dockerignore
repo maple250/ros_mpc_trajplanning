@@ -1,0 +1,9 @@
+# 构建上下文排除项（减小传给 docker daemon 的上下文）
+.git
+.gitignore
+.vscode
+**/build
+**/devel
+**/__pycache__
+*.pyc
+*.log
