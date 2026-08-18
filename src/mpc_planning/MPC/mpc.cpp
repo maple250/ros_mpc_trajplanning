@@ -159,15 +159,7 @@ void MPC::setStage(const State &xk, const Input &uk, const TargetState &target_p
     stages_[time_step].ns = 0;
     stages_[time_step].cost_mat = normalizeCost(cost_.getCost(target_pred, n_t, xk, uk, time_step));
 
-    LinModelMatrix lin_model;
-    lin_model.A = Eigen::Matrix<double, NX, NX>::Identity();
-    lin_model.B = Eigen::Matrix<double, NX, NU>::Zero();
-    lin_model.g = Eigen::Matrix<double, NX, 1>::Zero();
-    const double drag_coeff = 0.2; // 空气阻尼系数 (试飞时如果发现指令超调，可微调此项)
-    lin_model.A.block<3, 3>(0, 3) = Eigen::Matrix3d::Identity() * Ts_;
-    lin_model.A.block<3, 3>(3, 3) = Eigen::Matrix3d::Identity() * (1.0 - drag_coeff * Ts_);
-    lin_model.B.block<3, 3>(3, 0) = Eigen::Matrix3d::Identity() * Ts_;
-    lin_model.g.setZero();
+    const LinModelMatrix lin_model = discretizeModel();
     stages_[time_step].lin_model = normalizeDynamics(lin_model);
     //将边界传入单步Stage结构体
     stages_[time_step].l_bounds_x = normalization_param_.T_x_inv.diagonal().cwiseProduct(bounds_.getBoundsLX());
@@ -196,6 +188,31 @@ LinModelMatrix MPC::normalizeDynamics(const LinModelMatrix &lin_model)
     const g_MPC g = normalization_param_.T_x_inv.diagonal().asDiagonal() * lin_model.g;
     return {A,B,g};
 }
+//连续模型 p'=v, v'=u-drag_coeff*v 的精确 ZOH 离散化：
+//  A = [[I, b_v*I],[0, adv*I]],  B = [[b_p*I],[b_v*I]]
+//  其中 adv = e^{-c*Ts}, b_v = (1-adv)/c, b_p = (Ts-b_v)/c
+LinModelMatrix MPC::discretizeModel() const
+{
+    LinModelMatrix lin_model;
+    lin_model.A = Eigen::Matrix<double, NX, NX>::Identity();
+    lin_model.B = Eigen::Matrix<double, NX, NU>::Zero();
+    lin_model.g = Eigen::Matrix<double, NX, 1>::Zero();
+    if (drag_coeff > 1e-9) {
+        const double adv = std::exp(-drag_coeff * Ts_); // v 的自回归系数
+        const double b_v = (1.0 - adv) / drag_coeff;    // v 对 u、p 对 v 的增益
+        const double b_p = (Ts_ - b_v) / drag_coeff;    // p 对 u 的增益（Euler 离散化此项为 0）
+        lin_model.A.block<3, 3>(0, 3) = Eigen::Matrix3d::Identity() * b_v;
+        lin_model.A.block<3, 3>(3, 3) = Eigen::Matrix3d::Identity() * adv;
+        lin_model.B.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity() * b_p;
+        lin_model.B.block<3, 3>(3, 0) = Eigen::Matrix3d::Identity() * b_v;
+    } else {
+        // 无阻尼退化：纯双积分器精确离散化
+        lin_model.A.block<3, 3>(0, 3) = Eigen::Matrix3d::Identity() * Ts_;
+        lin_model.B.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity() * (0.5 * Ts_ * Ts_);
+        lin_model.B.block<3, 3>(3, 0) = Eigen::Matrix3d::Identity() * Ts_;
+    }
+    return lin_model;
+}
 //输入N+1步归一化后的MPC解（状态-输入），输出反归一化后的MPC解，并转换为 多个结构体容器array 形式
 std::array<OptVariables,N+1> MPC::deNormalizeSolution(const std::array<OptVariables,N+1> &solution)
 {
@@ -220,11 +237,9 @@ void MPC::updateInitialGuess(const State &x0)
     initial_guess_[0].xk = x0;
     initial_guess_[N-1].uk = initial_guess_[N-2].uk;// = initial_guess_[N-2].uk;
 
-    Eigen::Matrix<double, NX, NX> An = Eigen::Matrix<double, NX, NX>::Identity();
-    Eigen::Matrix<double, NX, NU> Bn = Eigen::Matrix<double, NX, NU>::Zero();
-    An.block<3, 3>(3, 3) = Eigen::Matrix3d::Identity() * (1.0 - 0.2 * Ts_);
-    Bn.block<3, 3>(3, 0) = Eigen::Matrix3d::Identity() * Ts_;
-    initial_guess_[N].xk = vectorToState( An * stateToVector(initial_guess_[N-1].xk) + Bn * inputToVector(initial_guess_[N-1].uk) );
+    // 与 setStage 使用同一离散化模型传播末步初始猜测（此前此处手写的 An 缺少 p+=v*Ts 项）
+    const LinModelMatrix disc = discretizeModel();
+    initial_guess_[N].xk = vectorToState( disc.A * stateToVector(initial_guess_[N-1].xk) + disc.B * inputToVector(initial_guess_[N-1].uk) );
     initial_guess_[N].uk.setZero();// = initial_guess_[N-2].uk;m脚本中这个位置为空，即输入序列永远比输出序列少一位
 }
 //输入初始状态，生成N+1步的初始猜测序列（如m脚本中的初始匀速直线前进假设）

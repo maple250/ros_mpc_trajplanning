@@ -79,6 +79,8 @@ private:
 
     CostMatrix normalizeCost(const CostMatrix &cost_mat);
     LinModelMatrix normalizeDynamics(const LinModelMatrix &lin_model);
+    // 连续模型 p'=v, v'=u-drag_coeff*v 的精确 ZOH 离散化（setStage 与 updateInitialGuess 共用，保证一致）
+    LinModelMatrix discretizeModel() const;
     std::array<OptVariables,N+1> deNormalizeSolution(const std::array<OptVariables,N+1> &solution);
     void updateInitialGuess(const State &x0);
     void generateNewInitialGuess(const State &x0);

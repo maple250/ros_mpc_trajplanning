@@ -15,10 +15,26 @@ using json = nlohmann::json;
 //代价函数参数
 class CostParam{
 public:
-    double q_l;
+    // 1. 法向位置误差收敛项：e_c = (I-n n^T)(p-p_t)，J = e_c^T Qc e_c
     double q_c;
+    // 4. 速度跟踪二次项固定权重（随距离调制：距离越大权重越大）
     double q_v;
+    // 5. 加速度指令惩罚权重
     double q_a;
+    // 2. 速度大小奖励项峰值权重（LOS 与 v_t 夹角 θ=π 迎面处最大，高斯衰减）
+    double q_vmag;
+    // 2. 速度大小奖励权重的高斯宽度 (rad)
+    double sigma_v;
+    // 3. APN 速度增量项固定权重（随距离调制：距离越小权重越大）
+    double q_dv;
+    // 3. APN 制导系数 N
+    double N_apn;
+    // 3. APN 权重 tanh 过渡中心距离与过渡宽度
+    double rho_dv;
+    double k_dv;
+    // 4. 速度跟踪权重 tanh 过渡中心距离与过渡宽度
+    double rho_v;
+    double k_v;
     CostParam();
     CostParam(std::string file);
 };

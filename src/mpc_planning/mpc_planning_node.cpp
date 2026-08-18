@@ -53,8 +53,15 @@ public:
         set_mode_client_ = nh_.serviceClient<mavros_msgs::SetMode>("mavros/set_mode");
         // --- 2. 算法模块初始化 ---
         // 初始化 PID 控制器 ,延迟初始化
-        PIDcontroller::PosLoopParam pos_p {Eigen::Vector3d(0.5, 0.5, 0.5), Eigen::Vector3d(25.0, 25.0, 25.0)};
-        PIDcontroller::VelLoopParam vel_p {Eigen::Vector3d(0.8, 0.8, 0.5), Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),Eigen::Vector3d(10.0, 10.0, 10.0)};
+        PIDcontroller::PosLoopParam pos_p;
+        pos_p.kp << 0.5, 0.5, 0.5;
+        pos_p.vel_lim << 25.0, 25.0, 25.0;
+        PIDcontroller::VelLoopParam vel_p;
+        vel_p.kp << 0.8, 0.8, 0.5;
+        vel_p.ki << 0.0, 0.0, 0.0;
+        vel_p.kd << 0.0, 0.0, 0.0;
+        vel_p.integral_lim << 5.0, 5.0, 5.0;
+
         pid_controller_ = std::make_unique<PIDcontroller>(0.01, pos_p, vel_p); // 100Hz Ts = 0.01s
         //堆分配 + 独占智能指针：可以避开成员变量必须在初始化列表中赋值的要求，允许空指针不做任何事情就度过初始化阶段
         mpc_ = std::make_unique<MPC>(1, 5, 1.0, 0.1, json_paths);
@@ -94,7 +101,7 @@ private:
     ros::Timer timer_100hz_;
     //Initialization
     Eigen::Vector3d true_target_p_{1800.0, 1200.0, 300.0};
-    Eigen::Vector3d true_target_v_{-18.0, -3.0, -0.0};
+    Eigen::Vector3d true_target_v_{-15.0, -0.0, -0.0};
     Eigen::Vector3d UAV_p{0.0, 0.0, 30.0};
     Eigen::Vector3d UAV_v{0.0, 0.0, 0.0};
     //堆分配 + 独占智能指针：可以避开成员变量必须在初始化列表中赋值的要求，允许空指针不做任何事情就度过初始化阶段
@@ -161,7 +168,7 @@ private:
         double dt = 2.0;
         // 简单的目标机动更新
         Eigen::Matrix3d R_turn = Eigen::Matrix3d::Identity();
-        R_turn = Eigen::AngleAxisd(0.01 * dt, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+        // R_turn = Eigen::AngleAxisd(0.05 * dt, Eigen::Vector3d::UnitZ()).toRotationMatrix();
         true_target_v_ = R_turn * true_target_v_;
         true_target_p_ += true_target_v_ * dt;
         std::lock_guard<std::mutex> lock(data_mutex_);
