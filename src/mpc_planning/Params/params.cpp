@@ -12,10 +12,23 @@ CostParam::CostParam(std::string file){
     std::ifstream iCost(file);
     json jsonCost;
     iCost >> jsonCost;
-    q_l          = jsonCost["q_l"];
+    // 1. 法向位置误差收敛项
     q_c          = jsonCost["q_c"];
+    // 4. 速度跟踪二次项（固定权重，随距离调制）
     q_v          = jsonCost["q_v"];
+    // 5. 加速度指令惩罚项
     q_a          = jsonCost["q_a"];
+    // 2. 速度大小奖励项（高斯变权重）
+    q_vmag       = jsonCost["q_vmag"];
+    sigma_v      = jsonCost["sigma_v"];
+    // 3. APN 速度增量项（tanh 变权重）
+    q_dv         = jsonCost["q_dv"];
+    N_apn        = jsonCost["N_apn"];
+    rho_dv       = jsonCost["rho_dv"];
+    k_dv         = jsonCost["k_dv"];
+    // 4. 速度跟踪权重 tanh 调制参数
+    rho_v        = jsonCost["rho_v"];
+    k_v          = jsonCost["k_v"];
 }
 
 BoundsParam::BoundsParam() {
@@ -47,7 +60,7 @@ BoundsParam::BoundsParam(std::string file) {
     lower_input_bounds.ax_l = jsonBounds["ax_l"];
     lower_input_bounds.ay_l = jsonBounds["ay_l"];
     lower_input_bounds.az_l = jsonBounds["az_l"];
-    
+
     upper_input_bounds.ax_u = jsonBounds["ax_u"];
     upper_input_bounds.ay_u = jsonBounds["ay_u"];
     upper_input_bounds.az_u = jsonBounds["az_u"];

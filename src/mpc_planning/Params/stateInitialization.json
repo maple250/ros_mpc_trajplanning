@@ -1,11 +1,11 @@
 
 {
-  "pxt_init": 1800,
-  "pyt_init": 1500,
-  "pzt_init": 320,
-  "vxt_init": -18,
-  "vyt_init": -6,
-  "vzt_init": -2.0,
+  "pxt_init": 1300,
+  "pyt_init": 1000,
+  "pzt_init": 200,
+  "vxt_init": -25,
+  "vyt_init": -15,
+  "vzt_init": -2,
 
   "pxs_init": 0.0,
   "pys_init": 0.0,

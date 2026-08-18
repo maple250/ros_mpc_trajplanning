@@ -21,6 +21,8 @@ constexpr double Ts = 0.1; // 规划步长
 
 static constexpr int N = 30;//编译时就初始化的常量
 static constexpr double INF = 1E5;
+// 连续模型 v' = u - drag_coeff*v 的空气阻尼系数（唯一出处，QP 模型与初始猜测传播共用）
+constexpr double drag_coeff = 0.2;
 struct StateInputIndex{
     int px = 0;
     int py = 1;
