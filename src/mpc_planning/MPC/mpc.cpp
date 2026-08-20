@@ -124,7 +124,8 @@ TrackPackage MPC::runInterceptMPC(const State &x0, const TargetState &target_cur
     return result_packg;
 }
 
-void MPC::logData(const State &x, const TargetState &target, const TrackPackage &plan)
+void MPC::logData(const State &x, const TargetState &target, const TrackPackage &plan,
+                  const std::array<double,4> &motor_pwm, const std::array<double,3> &pid_accel)
 {
     // 降采样记录规划轨迹
     ego_log.push_back(x);
@@ -132,12 +133,36 @@ void MPC::logData(const State &x, const TargetState &target, const TrackPackage 
     if (step_counter % 25 == 0) {
         plan_log.push_back(plan);
     }
+    // 当前时刻 MPC 加速度指令（预测轨迹首点）
+    Input a_cmd;
+    a_cmd.setZero();
+    if (!plan.track_planning_a.empty()) {
+        a_cmd.ax = plan.track_planning_a.front().x();
+        a_cmd.ay = plan.track_planning_a.front().y();
+        a_cmd.az = plan.track_planning_a.front().z();
+    }
+    mpc_accel_log.push_back({a_cmd.ax, a_cmd.ay, a_cmd.az});
+    pid_accel_log.push_back(pid_accel);
+    // 电机数据：优先使用飞控真实 PWM 反馈(/mavros/rc/out)；
+    // 反馈为全零时，用当前时刻 MPC 加速度指令经简化分配模型估算
+    const bool has_real = motor_pwm[0] != 0.0 || motor_pwm[1] != 0.0 ||
+                          motor_pwm[2] != 0.0 || motor_pwm[3] != 0.0;
+    if (has_real) {
+        motor_log.push_back(motor_pwm);
+        motor_pwm_is_real_ = true;
+        last_real_pwm_ = motor_pwm;
+    } else if (motor_pwm_is_real_) {
+        motor_log.push_back(last_real_pwm_); // 反馈丢帧，保持上一帧
+    } else {
+        motor_log.push_back(estimateMotorPWM(a_cmd));
+    }
     step_counter++;
 }
 void MPC::logPlot(const double Ts_, const PathToJson &json_paths)
 {
     Plotting plotter(Ts_, json_paths);
-    plotter.plotIntercept(ego_log, target_log, plan_log);
+    plotter.plotIntercept(ego_log, target_log, plan_log, motor_log, motor_pwm_is_real_,
+                          mpc_accel_log, pid_accel_log);
 }
 void MPC::reached_detection(const State &x, const TargetState &x_t, double offboard_time_, const PathToJson &json_paths)
 {

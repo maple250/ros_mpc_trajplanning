@@ -3,6 +3,7 @@
 #include <cmath>
 #include <mutex>
 #include <atomic>
+#include <array>
 
 #include <ros/ros.h>
 #include <ros/package.h>
@@ -12,6 +13,7 @@
 #include <mavros_msgs/PositionTarget.h>
 #include <mavros_msgs/CommandBool.h>  // 【新增】解锁服务
 #include <mavros_msgs/SetMode.h>      // 【新增】切模式服务
+#include <mavros_msgs/RCOut.h>        // 【新增】电机 PWM 反馈（SERVO_OUTPUT_RAW）
 #include <nav_msgs/Odometry.h>
 #include <geometry_msgs/PoseStamped.h>
 
@@ -46,6 +48,7 @@ public:
         // --- 1. ROS 发布与订阅 ---
         state_sub_ = nh_.subscribe<mavros_msgs::State>("mavros/state", 10, &MPCPlanningNode::stateCallback, this);
         odom_sub_ = nh_.subscribe<nav_msgs::Odometry>("mavros/local_position/odom", 10, &MPCPlanningNode::odomCallback, this);
+        rc_out_sub_ = nh_.subscribe<mavros_msgs::RCOut>("mavros/rc/out", 10, &MPCPlanningNode::rcOutCallback, this);
         
         // MAVROS 控制指令发布 (使用 PositionTarget 支持位置、速度、加速度混合控制)
         setpoint_pub_ = nh_.advertise<mavros_msgs::PositionTarget>("mavros/setpoint_raw/local", 10);
@@ -92,6 +95,7 @@ private:
     ros::NodeHandle nh_;
     ros::Subscriber state_sub_;
     ros::Subscriber odom_sub_;
+    ros::Subscriber rc_out_sub_;
     ros::Publisher setpoint_pub_;
     ros::ServiceClient arming_client_;
     ros::ServiceClient set_mode_client_;
@@ -130,6 +134,12 @@ private:
     bool has_new_target_meas_ = false;
     Eigen::Vector3d meas_p_, meas_v_;
 
+    // 四电机 PWM 反馈（/mavros/rc/out，µs），无反馈时保持全零
+    std::array<double,4> motor_pwm_ = {0, 0, 0, 0};
+
+    // 底层 PID 输出的平滑加速度指令（100Hz 更新，随 10Hz 日志采样，用于绘图对比）
+    std::array<double,3> pid_accel_cmd_ = {0, 0, 0};
+
     // ================= Callbacks =================
     void stateCallback(const mavros_msgs::State::ConstPtr& msg) {
         current_state_ = *msg;
@@ -162,13 +172,21 @@ private:
         }
     }
 
+    // ================= 电机 PWM 反馈 =================
+    void rcOutCallback(const mavros_msgs::RCOut::ConstPtr& msg) {
+        if (msg->channels.size() >= 4) {
+            std::lock_guard<std::mutex> lock(data_mutex_);
+            for (int i = 0; i < 4; ++i) motor_pwm_[i] = static_cast<double>(msg->channels[i]);
+        }
+    }
+
     // ================= 0.5Hz 目标模拟器 =================
     void targetSensorTimer(const ros::TimerEvent& event) {
         if (flight_state_ != FlightState::TRACKING_MPC) return;
         double dt = 2.0;
         // 简单的目标机动更新
         Eigen::Matrix3d R_turn = Eigen::Matrix3d::Identity();
-        // R_turn = Eigen::AngleAxisd(0.05 * dt, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+        R_turn = Eigen::AngleAxisd(0.15 * dt, Eigen::Vector3d::UnitZ()).toRotationMatrix();
         true_target_v_ = R_turn * true_target_v_;
         true_target_p_ += true_target_v_ * dt;
         std::lock_guard<std::mutex> lock(data_mutex_);
@@ -199,7 +217,15 @@ private:
 
         // 3. 运行 MPC
         TrackPackage traj_pack = mpc_->runInterceptMPC(mpc_ego_state_, target_kf, offboard_time);
-        mpc_->logData(mpc_ego_state_, target_kf, traj_pack); // 记录数据用于后续分析和绘图
+        // 记录数据用于后续分析和绘图（含电机 PWM 反馈与 PID 平滑加速度指令）
+        std::array<double,4> pwm_copy;
+        std::array<double,3> pid_accel_copy;
+        {
+            std::lock_guard<std::mutex> lock(data_mutex_);
+            pwm_copy = motor_pwm_;
+            pid_accel_copy = pid_accel_cmd_;
+        }
+        mpc_->logData(mpc_ego_state_, target_kf, traj_pack, pwm_copy, pid_accel_copy);
         // 4. 将解算出的轨迹压入共享内存
         {
             std::lock_guard<std::mutex> lock(data_mutex_);
@@ -272,6 +298,12 @@ private:
 
                 // 传入 1 = 加速度控制模式
                 pid_controller_->ConductPID(current_pkg, fix_origin, ego_fbk_, offboard_time, 1, drone_ctrl);
+
+                // 记录 PID 平滑后的加速度指令（MPC 指令与实际响应的中间量，用于绘图对比）
+                {
+                    std::lock_guard<std::mutex> lock(data_mutex_);
+                    for (int i = 0; i < 3; ++i) pid_accel_cmd_[i] = drone_ctrl.acceleration_command[i];
+                }
 
                 // 将 FCUControlProtocol 映射给 MAVROS 的加速度控制类型
                 // 注意掩码：忽略位置、速度，仅保留加速度和偏航角

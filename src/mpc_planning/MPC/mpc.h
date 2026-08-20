@@ -65,7 +65,10 @@ public:
     bool traj_finish = false;// --- 跟踪状态标志位 ---
     InitialParam state_param_;
     TrackPackage runInterceptMPC(const State &x0, const TargetState &target_current, double offboard_time);
-    void logData(const State &x, const TargetState &target, const TrackPackage &plan);
+    // motor_pwm: 飞控最新四电机 PWM 反馈(µs)，无反馈时传全零（内部降级为指令估算）
+    // pid_accel: 底层 PID 平滑后的加速度指令（ENU）
+    void logData(const State &x, const TargetState &target, const TrackPackage &plan,
+                 const std::array<double,4> &motor_pwm, const std::array<double,3> &pid_accel);
     // void logPlot();
     void logPlot(const double Ts_, const PathToJson &json_paths);
     void reached_detection(const State &x, const TargetState &x_t, double offboard_time_, const PathToJson &json_paths);
@@ -104,6 +107,11 @@ private:
     std::vector<State> ego_log;
     std::vector<TargetState> target_log;
     std::vector<TrackPackage> plan_log;
+    std::vector<std::array<double,4>> motor_log; // 四电机 PWM(µs)，与 ego_log 同频
+    bool motor_pwm_is_real_ = false;             // true=来自 /mavros/rc/out 反馈，false=指令估算
+    std::array<double,4> last_real_pwm_ = {0, 0, 0, 0}; // 反馈偶尔丢帧时保持上一帧
+    std::vector<std::array<double,3>> mpc_accel_log; // MPC 每步输出的首点加速度指令（ENU）
+    std::vector<std::array<double,3>> pid_accel_log; // 底层 PID 平滑后的加速度指令（10Hz 采样）
     int step_counter = 0; // 用于降采样记录规划轨迹
 };
 
