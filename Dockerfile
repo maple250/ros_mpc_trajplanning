@@ -27,7 +27,7 @@ RUN if [ -n "$HTTPS_PROXY" ]; then \
     fi
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-noetic-mavros ros-noetic-mavros-extras \
-        python3-dev python3-numpy python3-matplotlib python3-pip \
+        python3-dev python3-numpy python3-matplotlib python3-pip python3-tk \
         geographiclib-tools \
         libglvnd0 libgl1 libegl1 libgles2 libglx0 libglib2.0-0 \
         git cmake build-essential libtool autoconf unzip wget \
