@@ -45,7 +45,7 @@ CostMatrix Cost::getCost(const TargetState &target_pred, const Eigen::Vector3d &
     const double w_v_track = 0.5 * (1.0 - std::tanh((rho - cost_param_.rho_v) / cost_param_.k_v));
     Eigen::Matrix3d Q_p = cost_param_.q_c * w_v_track * P_cross;
     cost.Q.block<3,3>(0,0) = Q_p;
-    cost.f.head(3) = -Q_p * w_v_track * target_pred.p_t;
+    cost.f.head(3) = -Q_p * target_pred.p_t;
 
     //==================== 2. 速度大小控制项（高斯变权重） ====================
     // theta = angle(LOS, v_t)：迎面(theta->pi)权重最大，追击(theta->0)权重最小
@@ -64,19 +64,26 @@ CostMatrix Cost::getCost(const TargetState &target_pred, const Eigen::Vector3d &
     Eigen::Vector3d n_speed = (v_ego.norm() > 1e-3) ? v_ego.normalized() : n_los;
     cost.f.segment<3>(3) += -w_vmag * n_speed;
 
-    //==================== 3. 基于 APN 制导律的速度矢量增量项 ====================
-    // LOS 视线角速度（矢量形式）：lambda_dot_vec = (r x v_rel) / rho^2
-    // APN 指令：a_apn = N * |v_rel| * |lambda_dot| * n_perp，n_perp = (r x v_rel) 方向单位向量
-    // 代价 J_dv = -w_dv(rho) * dt * a_apn^T u，即奖励速度增量 dt*u 与 APN 指令方向对齐
-    // 变权重：距离越小权重越大（近距末段强化 APN 修正），距离越大权重趋零
-    // w_dv(rho) = q_dv * 0.5*(1 - tanh((rho - rho_dv)/k_dv))
+    //==================== 3. 基于比例导引(PN)的速度矢量增量项 ====================
+    // LOS 转速大小：|lambda_dot| = |r x dr| / rho^2 = |v_rel⊥LOS| / rho（dr = v_t - v_ego，
+    // 代码中 w_los_vec = r x (v_ego - v_t) 与 r x dr 方向相反，但取模后 |lambda_dot| 相同）
+    // PN 指令：a_pn = N * |v_rel| * |lambda_dot| * n_perp，n_perp = Ω × n_los 方向（攻击平面内垂直 LOS）
+    // 代价 J_dv = -w_dv(rho) * dt * a_pn^T u，即奖励速度增量 dt*u 与 PN 指令方向对齐
+    // （经典 PN 结构；未含目标机动补偿项，非增广 APN；速度尺度用 |v_rel| 代替接近速度 Vc）
+    // 变权重：距离远时权重高（起始段强 PN 引导），距离近时权重指数衰减——
+    // 因 |lambda_dot| ~ 1/rho 随接近增长，近距降权可防止末端加速度指令发散
+    // w_dv(rho) = q_dv * 0.5*(1 + tanh((rho - rho_dv)/k_dv))：rho>>rho_dv -> q_dv，rho<<rho_dv -> 0
     Eigen::Vector3d v_rel = v_ego - target_pred.v_t;
-    Eigen::Vector3d w_los_vec = r_los.cross(v_rel); // = lambda_dot_vec * rho^2
+    Eigen::Vector3d w_los_vec = r_los.cross(v_rel); // 模 = rho^2 * |lambda_dot|
     const double lam_dot = w_los_vec.norm() / (rho * rho + 1e-9);
     const double w_dv = cost_param_.q_dv *
         0.5 * (1.0 + std::tanh((rho - cost_param_.rho_dv) / cost_param_.k_dv));
     if (w_los_vec.norm() > 1e-6) {
-        Eigen::Vector3d n_perp = w_los_vec.normalized();
+        // PN 机动方向：攻击平面内、垂直于 LOS，沿 (Ω × n_los) 方向。
+        // w_los_vec = r × (v_ego - v_t) 与经典 Ω ∝ r × ṙ (ṙ = v_t - v_ego) 方向相反，
+        // 故由反交换律写作 n_los × ŵ 等价于 Ω̂ × n̂_los（直接用 ŵ 会得到平面法向，差 90°）
+        Eigen::Vector3d n_perp = n_los.cross(w_los_vec.normalized());
+        n_perp.normalize(); // n_los ⊥ ŵ 恒成立，此处模长必为 1，normalize 仅作数值保险
         Eigen::Vector3d a_apn = cost_param_.N_apn * v_rel.norm() * lam_dot * n_perp;
         cost.r += -w_dv * Ts * a_apn;
     }
