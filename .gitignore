@@ -1,3 +1,6 @@
 build/
 devel/
-src/mpc_planning/External/
+src/mpc_planning/External/*
+!src/mpc_planning/External/matplotlib/
+src/mpc_planning/External/matplotlib/*
+!src/mpc_planning/External/matplotlib/matplotlibcpp.h
