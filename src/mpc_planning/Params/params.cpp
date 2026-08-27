@@ -1,5 +1,6 @@
 //类特点：成员变量粗分类、存储参数，成员函数负责从json文件读取参数
 #include "params.h"
+#include <cmath>
 namespace mpcc{
 CostParam::CostParam(){
     std::cout << "Default initialization of cost" << std::endl;
@@ -113,9 +114,17 @@ InitialParam::InitialParam(std::string file){
     Pos_target_init.x() = jsonNorm["pxt_init"];
     Pos_target_init.y() = jsonNorm["pyt_init"];
     Pos_target_init.z() = jsonNorm["pzt_init"];
-    Vel_target_init.x() = jsonNorm["vxt_init"];
-    Vel_target_init.y() = jsonNorm["vyt_init"];
-    Vel_target_init.z() = jsonNorm["vzt_init"];
+    //目标运动特性：水平/垂直速度大小 + 水平速度方位角 theta (deg)
+    Target_vel_h    = jsonNorm["vht_init"];
+    Target_vel_v    = jsonNorm["vzt_init"];
+    Target_theta    = jsonNorm["theta_init"];
+    Target_movetype = jsonNorm["movetype_init"];
+    Target_circle_R = jsonNorm["Rt_init"];
+    //换算惯性系初始速度分量：vx = Vh*cos(theta)，vy = Vh*sin(theta)，vz 直接取垂直速度
+    double theta_rad = Target_theta * M_PI / 180.0;
+    Vel_target_init.x() = Target_vel_h * std::cos(theta_rad);
+    Vel_target_init.y() = Target_vel_h * std::sin(theta_rad);
+    Vel_target_init.z() = Target_vel_v;
 
     Pos_self_init.x() = jsonNorm["pxs_init"];
     Pos_self_init.y() = jsonNorm["pys_init"];

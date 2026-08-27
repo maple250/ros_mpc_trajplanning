@@ -96,6 +96,12 @@ public:
     Eigen::Vector3d Vel_target_init;
     Eigen::Vector3d Pos_self_init;
     Eigen::Vector3d Vel_self_init;
+    //目标运动特性参数（由速度大小+方位角描述，Vel_target_init 换算得到）
+    double Target_vel_h;     //水平（惯性系）合速度大小 (m/s)
+    double Target_vel_v;     //垂直（惯性系）速度 (m/s)，负值代表下降
+    double Target_theta;     //水平速度方位角 (deg)，逆时针为正
+    int Target_movetype;     //运动模式：1 匀速直线，2 匀速圆周，3 预留拓展
+    double Target_circle_R;  //匀速圆周运动半径 (m)，正=逆时针盘旋，负=顺时针盘旋
     InitialParam();
     InitialParam(std::string file);
 };
