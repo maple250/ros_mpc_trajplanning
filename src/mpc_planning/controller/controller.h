@@ -80,6 +80,15 @@ protected://只能在类定义中使用 对象不能调用
     Eigen::Vector3d Vel_q{0.0, 0.0, 0.0};  // 当前轨迹段速度
     Eigen::Vector3d Acc_p{0.0, 0.0, 0.0};  // 当前轨迹段加速度
 
+    // ======== 轨迹切换跳变平滑（offset decay）相关变量 ========
+    double last_traj_start_time_ = -1.0;   // 上一条轨迹的起始时间，用于检测新轨迹包
+    bool is_new_traj_received_ = false;    // 刚切换到新轨迹的标志
+    bool is_first_reference_ = true;       // 首次插值标志（首帧用反馈状态作参考，避免开局误差爆炸）
+    Eigen::Vector3d pos_offset_{0.0, 0.0, 0.0}; // 位置平滑偏移量（新旧参考断层，指数衰减消化）
+    Eigen::Vector3d vel_offset_{0.0, 0.0, 0.0}; // 速度平滑偏移量
+    double last_update_time_ = -1.0;       // 上次插值时刻，用于计算实际控制周期
+    // ===============================================
+
     //限幅函数
     double LimitValue(double value, double min_val, double max_val);
     //一阶低通滤波 
@@ -118,6 +127,8 @@ private:
     Eigen::Vector3d vel_err_integral_{0.0,0.0,0.0};//速度误差积分
     Eigen::Vector3d prev_vel_err_{0,0,0};
     Eigen::Vector3d Vel_feedforward{0.0, 0.0, 0.0};// 速度前馈记录
+    // 运动学平方根控制器（ArduPilot 风格）：近距离线性 P，远距离匀减速刹车不超调
+    double SqrtController(double error, double p_gain, double max_accel);
     // 位置环（P + 速度前馈）
     void PositionLoop();
     // 速度环（PID + 加速度前馈）

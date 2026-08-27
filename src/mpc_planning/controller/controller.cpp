@@ -18,7 +18,14 @@ namespace mpcc {
         // 1. 存储/更新轨迹包
         // 只有当包内有数据时才更新本地存储，防止空包覆盖旧数据
         if (pkg.track_planning_time.size() > 0) {
-            track_data_ = pkg; 
+            // 新轨迹包判定：起始时间变化 -> 触发跳变平滑机制（offset decay）
+            if (pkg.track_planning_time[0] != last_traj_start_time_) {
+                if (loop_broken) {
+                    is_new_traj_received_ = true;
+                }
+                last_traj_start_time_ = pkg.track_planning_time[0];
+            }
+            track_data_ = pkg;
             // 第一次收到数据，打印调试信息
             if (!loop_broken) {
                 std::cout << "<<<<<<<<<<<<<<<<<<TRAJ--TRACKING START>>>>>>>>>>>>>>>>" << std::endl;
@@ -45,53 +52,84 @@ namespace mpcc {
         }
         return 0; // 状态：正常，可以进行计算
     }
-    // 根据时间更新参考状态
+    // 根据时间更新参考状态（移植自实机部署版：时间索引 + 二阶插值 + 跳变平滑）
     void Controller_Base::UpdateReferenceFromTrack(double offboard_time, const Eigen::Vector3d& fix_origin)
     {
-        // if (track_data_.track_number < 2) return;
-        // // 查找索引 countt
-        // // 优化：从上次的 countt 开始找，不必每次从 0 开始
-        // for (countt = 0; countt < track_data_.track_number - 2; countt++) {
-        //     if (offboard_time >= track_data_.track_planning_time[countt] && offboard_time < track_data_.track_planning_time[countt+1]) break;
-        //     }
-        // if (offboard_time < track_data_.track_planning_time[0]) countt = 0;
+        if (track_data_.track_number < 2) return;
+        // 1. 计算实际控制周期 dt_ctrl（用于 offset 衰减运算），异常时退回 100Hz 默认值
+        double dt_ctrl = 0.01;
+        if (last_update_time_ > 0.0) {
+            dt_ctrl = offboard_time - last_update_time_;
+            if (dt_ctrl <= 0.0 || dt_ctrl > 0.1) dt_ctrl = 0.01; // 异常保护
+        }
+        last_update_time_ = offboard_time;
 
-        // static int guidance_count2 = 0;
-        // if(guidance_count2 % 20 == 0)
-        // {
-        //     std::cout << "offboard_time：" << offboard_time << "  countt：" << countt << std::endl;
-        // }
-        // guidance_count2++;
-        
-        // // 提取数据并插值
-        const int countt = 3;
-        // double tp = track_data_.track_planning_time[countt];
-        // double tq = track_data_.track_planning_time[countt + 1];
-        // double dt = tq - tp;
-        
-        // // 使用成员变量存储轨迹段数据
-        // Pos_p = track_data_.track_planning_p[countt];
-        // Vel_p = track_data_.track_planning_v[countt];
-        // Vel_q = track_data_.track_planning_v[countt + 1];
-        // Acc_p = track_data_.track_planning_a[countt];
-        
-        // // 只需要计算当前这一段起点的偏移即可，因为参考点是基于 Pos_p 插值得来的
-        // Pos_p = Pos_p - fix_origin;
-        // if (std::abs(dt) > 1e-6f) {
-            // double t_diff = (double)(offboard_time - tp);
-            // state_ref.Pos_enu = Pos_p + t_diff * Vel_p + (t_diff * t_diff) / (2 * dt) * (Vel_q - Vel_p);
-            // state_ref.Vel_enu = Vel_p + (t_diff / dt) * (Vel_q - Vel_p);
-            // state_ref.Acc_enu = Acc_p; 
-        // }
-        // else {
-        // state_ref.Pos_enu = Pos_p;
-        // state_ref.Vel_enu.setZero();
-        // state_ref.Acc_enu.setZero();
-        // }
-// std::cout << track_data_.track_number << std::endl;
-        state_ref.Pos_enu = track_data_.track_planning_p[countt];
-        state_ref.Vel_enu = track_data_.track_planning_v[countt];
-        state_ref.Acc_enu = track_data_.track_planning_a[countt];
+        // 2. 按 offboard_time 查找当前所在的轨迹段 [countt, countt+1]
+        for (countt = 0; countt < track_data_.track_number - 2; countt++) {
+            if (offboard_time >= track_data_.track_planning_time[countt] && offboard_time < track_data_.track_planning_time[countt+1]) break;
+        }
+        if (offboard_time < track_data_.track_planning_time[0]) countt = 0;
+
+        // 3. 提取轨迹段数据
+        const double tp = track_data_.track_planning_time[countt];
+        const double tq = track_data_.track_planning_time[countt + 1];
+        const double dt = tq - tp;
+
+        Pos_p = track_data_.track_planning_p[countt];
+        Vel_p = track_data_.track_planning_v[countt];
+        Vel_q = track_data_.track_planning_v[countt + 1];
+        Acc_p = track_data_.track_planning_a[countt];
+
+        // 首帧特殊处理：用当前反馈状态作参考，避免开局位置误差爆炸
+        if (is_first_reference_) {
+            Pos_p = state_feedbk.Pos_enu + fix_origin;
+            Vel_p = state_feedbk.Vel_enu;
+            Vel_q = state_feedbk.Vel_enu;
+            is_first_reference_ = false;
+        }
+
+        // 只需要计算当前这一段起点的偏移即可，因为参考点是基于 Pos_p 插值得来的
+        Pos_p = Pos_p - fix_origin;
+
+        // 4. 计算当前的【原始】期望状态（会发生跳变的值）
+        Eigen::Vector3d raw_ref_pos, raw_ref_vel, raw_ref_acc;
+        if (std::abs(dt) > 1e-6) {
+            double t_diff = offboard_time - tp;
+            raw_ref_pos = Pos_p + t_diff * Vel_p + (t_diff * t_diff) / (2.0 * dt) * (Vel_q - Vel_p);
+            raw_ref_vel = Vel_p + (t_diff / dt) * (Vel_q - Vel_p);
+            raw_ref_acc = Acc_p;
+        }
+        else {
+            raw_ref_pos = Pos_p;
+            raw_ref_vel.setZero();
+            raw_ref_acc.setZero();
+        }
+
+        // =========================================================
+        // 5. 跳变平滑处理 (Offset Decay)：新轨迹到来时，新旧参考之间的
+        //    断层以时间常数 tau 指数衰减，保证参考状态连续
+        // =========================================================
+        if (is_new_traj_received_) {
+            // 计算当前执行的旧参考位置 与 新轨迹原始位置 之间的断层
+            pos_offset_ = state_ref.Pos_enu - raw_ref_pos;
+            vel_offset_ = state_ref.Vel_enu - raw_ref_vel;
+            is_new_traj_received_ = false; // 清除标志位
+        }
+
+        // 衰减时间常数 tau (秒)：越大过渡越平滑，但偏离新规划轨迹的时间越长
+        const double tau = 0.6;
+        const double decay_factor = std::exp(-dt_ctrl / tau);
+        pos_offset_ *= decay_factor;
+        vel_offset_ *= decay_factor;
+
+        // 防止极小值持续占用计算资源（浮点数下溢出）
+        if (pos_offset_.norm() < 0.01) pos_offset_.setZero();
+        if (vel_offset_.norm() < 0.01) vel_offset_.setZero();
+
+        // 6. 最终输出 = 原始插值 + 衰减偏移量
+        state_ref.Pos_enu = raw_ref_pos + pos_offset_;
+        state_ref.Vel_enu = raw_ref_vel + vel_offset_;
+        state_ref.Acc_enu = raw_ref_acc; // 加速度一般前馈直接给，不需要强平滑，否则会破坏动态响应
         // 判断轨迹是否结束
         if (offboard_time > (track_data_.track_planning_time.back() - 0.1)) {
             traj_finish_flag = true;
@@ -170,10 +208,11 @@ namespace mpcc {
             drone_ctrl.horizontal_mode = 4; // 过载/加速度模式
             drone_ctrl.vertical_mode = 4;
             UpdateOutput();
-            Eigen::Vector3d final_acc = control_output.Acc_enu; 
-            drone_ctrl.acceleration_command[0] = LimitValue(final_acc(0), -25.0f, 25.0f);
-            drone_ctrl.acceleration_command[1] = LimitValue(final_acc(1), -25.0f, 25.0f);
-            drone_ctrl.acceleration_command[2] = LimitValue(final_acc(2), -25.0f, 25.0f);
+            Eigen::Vector3d final_acc = control_output.Acc_enu;
+            drone_ctrl.acceleration_command[0] = LimitValue(final_acc(0), -15.0, 15.0);
+            drone_ctrl.acceleration_command[1] = LimitValue(final_acc(1), -15.0, 15.0);
+            // 垂向更保守（与实机部署版一致）
+            drone_ctrl.acceleration_command[2] = LimitValue(final_acc(2), -7.0, 7.0);
             
         } else if (mode_type == 2) {
             // Case: Landing_tracking (速度控制)
@@ -190,11 +229,37 @@ namespace mpcc {
         PositionLoop();
         VelocityLoop();
     }
+    // 运动学平方根控制器实现（ArduPilot 风格）
+    double PIDcontroller::SqrtController(double error, double p_gain, double max_accel)
+    {
+        if (p_gain <= 0.0) return 0.0;
+
+        // 计算线性区与非线性区的临界距离
+        double linear_dist = max_accel / (p_gain * p_gain);
+        double abs_error = std::abs(error);
+
+        if (abs_error < linear_dist) {
+            // 近距离：纯线性 P 控制，保证收敛和平滑
+            return p_gain * error;
+        } else {
+            // 远距离：平方根非线性控制，保证匀减速刹车不超调
+            double sign = (error > 0.0) ? 1.0 : -1.0;
+            return sign * std::sqrt(2.0 * max_accel * (abs_error - linear_dist / 2.0));
+        }
+    }
     // 位置环（P + 速度前馈）
     void PIDcontroller::PositionLoop()
-    {   
+    {
         Eigen::Vector3d pos_err = state_ref.Pos_enu - state_feedbk.Pos_enu;
-        vel_cmd_ = state_ref.Vel_enu + pos_param_.kp.cwiseProduct(pos_err);//对应位置元素相乘
+        // 设定无人机水平和垂向的最大物理追踪加速度（根据无人机动力学微调）
+        const double max_accel_xy = 8.0;
+        const double max_accel_z = 5.0;
+        Eigen::Vector3d vel_correction;
+        vel_correction(0) = SqrtController(pos_err(0), pos_param_.kp(0), max_accel_xy);
+        vel_correction(1) = SqrtController(pos_err(1), pos_param_.kp(1), max_accel_xy);
+        vel_correction(2) = SqrtController(pos_err(2), pos_param_.kp(2), max_accel_z);
+        // 总速度指令 = 轨迹前馈速度 + 修正速度
+        vel_cmd_ = state_ref.Vel_enu + vel_correction;
         // 限速
         vel_cmd_ = vel_cmd_.cwiseMax(-pos_param_.vel_lim).cwiseMin(pos_param_.vel_lim);
         control_output.Pos_enu = state_ref.Pos_enu;//给最终输出赋值：期望位置
