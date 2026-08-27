@@ -67,8 +67,12 @@ public:
     TrackPackage runInterceptMPC(const State &x0, const TargetState &target_current, double offboard_time);
     // motor_pwm: 飞控最新四电机 PWM 反馈(µs)，无反馈时传全零（内部降级为指令估算）
     // pid_accel: 底层 PID 平滑后的加速度指令（ENU）
+    // pid_ref_pos / pid_ref_vel: 底层 PID 按时刻插值得到的参考位置/速度（ENU）
+    // pid_vel: PID 输出的总速度指令（前馈 + 位置环修正，ENU）
     void logData(const State &x, const TargetState &target, const TrackPackage &plan,
-                 const std::array<double,4> &motor_pwm, const std::array<double,3> &pid_accel);
+                 const std::array<double,4> &motor_pwm, const std::array<double,3> &pid_accel,
+                 const std::array<double,3> &pid_ref_pos, const std::array<double,3> &pid_ref_vel,
+                 const std::array<double,3> &pid_vel);
     // void logPlot();
     void logPlot(const double Ts_, const PathToJson &json_paths);
     void reached_detection(const State &x, const TargetState &x_t, double offboard_time_, const PathToJson &json_paths);
@@ -112,6 +116,9 @@ private:
     std::array<double,4> last_real_pwm_ = {0, 0, 0, 0}; // 反馈偶尔丢帧时保持上一帧
     std::vector<std::array<double,3>> mpc_accel_log; // MPC 每步输出的首点加速度指令（ENU）
     std::vector<std::array<double,3>> pid_accel_log; // 底层 PID 平滑后的加速度指令（10Hz 采样）
+    std::vector<std::array<double,3>> ref_pos_log;   // PID 轨迹插值参考位置（ENU，与 ego_log 同频）
+    std::vector<std::array<double,3>> ref_vel_log;   // PID 轨迹插值参考速度（ENU，与 ego_log 同频）
+    std::vector<std::array<double,3>> pid_vel_log;   // PID 总速度指令（前馈+位置环修正，ENU，与 ego_log 同频）
     int step_counter = 0; // 用于降采样记录规划轨迹
 };
 

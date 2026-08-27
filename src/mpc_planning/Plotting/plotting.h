@@ -3,6 +3,7 @@
 
 #include "config.h"
 #include "types.h"
+#include "Params/params.h"
 #include <matplotlibcpp.h>
 #include <vector>
 #include <array>
@@ -21,16 +22,22 @@ public:
     // motor_log: 四电机 PWM(µs) 时间序列（与 ego_log 同频）
     // motor_pwm_is_real: true = 来自 /mavros/rc/out 真实反馈；false = 由 MPC 加速度指令估算
     // mpc_accel_log / pid_accel_log: MPC 首点加速度指令与底层 PID 平滑指令（ENU，与 ego_log 同频）
+    // ref_pos_log / ref_vel_log: 底层 PID 按时刻插值得到的参考位置/速度（ENU，与 ego_log 同频）
+    // pid_vel_log: PID 输出的总速度指令（前馈+位置环修正，ENU，与 ego_log 同频）
     void plotIntercept(const std::vector<State>& ego_log,
                        const std::vector<TargetState>& target_log,
                        const std::vector<TrackPackage>& plan_log,
                        const std::vector<std::array<double,4>>& motor_log,
                        bool motor_pwm_is_real,
                        const std::vector<std::array<double,3>>& mpc_accel_log,
-                       const std::vector<std::array<double,3>>& pid_accel_log) const;
+                       const std::vector<std::array<double,3>>& pid_accel_log,
+                       const std::vector<std::array<double,3>>& ref_pos_log,
+                       const std::vector<std::array<double,3>>& ref_vel_log,
+                       const std::vector<std::array<double,3>>& pid_vel_log) const;
 
 private:
     double Ts_; // 数据采样周期，用于时间轴
+    CostParam cost_param_; // 代价参数，用于重算各变权重随时间的变化曲线
 };
 
 // X 型四旋翼（PX4 iris 输出序号：M1前右 M2后左 M3前左 M4后右）简化推力分配模型：

@@ -57,20 +57,31 @@ public:
         // --- 2. 算法模块初始化 ---
         // 初始化 PID 控制器 ,延迟初始化
         PIDcontroller::PosLoopParam pos_p;
-        pos_p.kp << 0.5, 0.5, 0.5;
-        pos_p.vel_lim << 25.0, 25.0, 25.0;
+        pos_p.kp << 0.6, 0.6, 1.0;
+        pos_p.vel_lim << 25.0, 25.0, 15.0;
         PIDcontroller::VelLoopParam vel_p;
-        vel_p.kp << 0.8, 0.8, 0.5;
-        vel_p.ki << 0.0, 0.0, 0.0;
+        vel_p.kp << 0.7, 0.7, 0.7;
+        vel_p.ki << 0.05, 0.05, 0.05;
         vel_p.kd << 0.0, 0.0, 0.0;
         vel_p.integral_lim << 5.0, 5.0, 5.0;
 
         pid_controller_ = std::make_unique<PIDcontroller>(0.01, pos_p, vel_p); // 100Hz Ts = 0.01s
         //堆分配 + 独占智能指针：可以避开成员变量必须在初始化列表中赋值的要求，允许空指针不做任何事情就度过初始化阶段
-        mpc_ = std::make_unique<MPC>(1, 5, 1.0, 0.1, json_paths);
+        mpc_ = std::make_unique<MPC>(1, 5, 1.0, Ts, json_paths);
         
         true_target_p_ = mpc_->state_param_.Pos_target_init;
         true_target_v_ = mpc_->state_param_.Vel_target_init;
+        // 目标运动模式：1 匀速直线；2 匀速圆周，角速度 omega = Vh/R（R 带符号，正为逆时针盘旋）
+        target_movetype_ = mpc_->state_param_.Target_movetype;
+        if (target_movetype_ == 2) {
+            if (std::abs(mpc_->state_param_.Target_circle_R) < 1e-6) {
+                ROS_WARN("[Geffen] Circle radius Rt_init is ~0: circular motion degenerates to straight line.");
+            } else {
+                target_turn_rate_ = mpc_->state_param_.Target_vel_h / mpc_->state_param_.Target_circle_R;
+            }
+        } else if (target_movetype_ != 1) {
+            ROS_WARN("[Geffen] Target movetype %d is reserved and not implemented: treating as straight line.", target_movetype_);
+        }
         UAV_p = mpc_->state_param_.Pos_self_init;
         UAV_v = mpc_->state_param_.Vel_self_init;
         
@@ -106,6 +117,9 @@ private:
     //Initialization
     Eigen::Vector3d true_target_p_{1800.0, 1200.0, 300.0};
     Eigen::Vector3d true_target_v_{-15.0, -0.0, -0.0};
+    //目标运动特性（来自 stateInitialization.json）
+    int target_movetype_ = 1;      //1 匀速直线 2 匀速圆周 3 预留
+    double target_turn_rate_ = 0.0; //匀速圆周角速度 omega = Vh/R (rad/s)，正为逆时针
     Eigen::Vector3d UAV_p{0.0, 0.0, 30.0};
     Eigen::Vector3d UAV_v{0.0, 0.0, 0.0};
     //堆分配 + 独占智能指针：可以避开成员变量必须在初始化列表中赋值的要求，允许空指针不做任何事情就度过初始化阶段
@@ -139,6 +153,11 @@ private:
 
     // 底层 PID 输出的平滑加速度指令（100Hz 更新，随 10Hz 日志采样，用于绘图对比）
     std::array<double,3> pid_accel_cmd_ = {0, 0, 0};
+
+    // 轨迹插值参考状态与 PID 总速度指令（100Hz 更新，随 10Hz 日志采样，用于绘图对比）
+    std::array<double,3> pid_ref_pos_ = {0, 0, 0}; // PID 按时刻插值的参考位置 (ENU)
+    std::array<double,3> pid_ref_vel_ = {0, 0, 0}; // PID 按时刻插值的参考速度 (ENU)
+    std::array<double,3> pid_vel_cmd_ = {0, 0, 0}; // PID 总速度指令 = 前馈 + 位置环修正 (ENU)
 
     // ================= Callbacks =================
     void stateCallback(const mavros_msgs::State::ConstPtr& msg) {
@@ -184,10 +203,11 @@ private:
     void targetSensorTimer(const ros::TimerEvent& event) {
         if (flight_state_ != FlightState::TRACKING_MPC) return;
         double dt = 2.0;
-        // 简单的目标机动更新
-        Eigen::Matrix3d R_turn = Eigen::Matrix3d::Identity();
-        R_turn = Eigen::AngleAxisd(0.15 * dt, Eigen::Vector3d::UnitZ()).toRotationMatrix();
-        true_target_v_ = R_turn * true_target_v_;
+        // 目标机动更新：匀速圆周时水平速度矢量绕 z 轴旋转 omega*dt（vz 保持不变），匀速直线时不旋转
+        if (target_movetype_ == 2) {
+            Eigen::Matrix3d R_turn = Eigen::AngleAxisd(target_turn_rate_ * dt, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+            true_target_v_ = R_turn * true_target_v_;
+        }
         true_target_p_ += true_target_v_ * dt;
         std::lock_guard<std::mutex> lock(data_mutex_);
         meas_p_ = true_target_p_;
@@ -219,13 +239,17 @@ private:
         TrackPackage traj_pack = mpc_->runInterceptMPC(mpc_ego_state_, target_kf, offboard_time);
         // 记录数据用于后续分析和绘图（含电机 PWM 反馈与 PID 平滑加速度指令）
         std::array<double,4> pwm_copy;
-        std::array<double,3> pid_accel_copy;
+        std::array<double,3> pid_accel_copy, ref_pos_copy, ref_vel_copy, pid_vel_copy;
         {
             std::lock_guard<std::mutex> lock(data_mutex_);
             pwm_copy = motor_pwm_;
             pid_accel_copy = pid_accel_cmd_;
+            ref_pos_copy = pid_ref_pos_;
+            ref_vel_copy = pid_ref_vel_;
+            pid_vel_copy = pid_vel_cmd_;
         }
-        mpc_->logData(mpc_ego_state_, target_kf, traj_pack, pwm_copy, pid_accel_copy);
+        mpc_->logData(mpc_ego_state_, target_kf, traj_pack, pwm_copy, pid_accel_copy,
+                      ref_pos_copy, ref_vel_copy, pid_vel_copy);
         // 4. 将解算出的轨迹压入共享内存
         {
             std::lock_guard<std::mutex> lock(data_mutex_);
@@ -300,9 +324,15 @@ private:
                 pid_controller_->ConductPID(current_pkg, fix_origin, ego_fbk_, offboard_time, 1, drone_ctrl);
 
                 // 记录 PID 平滑后的加速度指令（MPC 指令与实际响应的中间量，用于绘图对比）
+                // 同时记录轨迹插值参考状态与 PID 总速度指令（读取 ConductPID 刚更新的内部量，同线程无竞争）
                 {
                     std::lock_guard<std::mutex> lock(data_mutex_);
-                    for (int i = 0; i < 3; ++i) pid_accel_cmd_[i] = drone_ctrl.acceleration_command[i];
+                    for (int i = 0; i < 3; ++i) {
+                        pid_accel_cmd_[i] = drone_ctrl.acceleration_command[i];
+                        pid_ref_pos_[i] = pid_controller_->state_ref.Pos_enu(i);
+                        pid_ref_vel_[i] = pid_controller_->state_ref.Vel_enu(i);
+                        pid_vel_cmd_[i] = pid_controller_->control_output.Vel_enu(i);
+                    }
                 }
 
                 // 将 FCUControlProtocol 映射给 MAVROS 的加速度控制类型

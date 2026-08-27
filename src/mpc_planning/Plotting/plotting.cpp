@@ -1,11 +1,12 @@
 #include "plotting.h"
 #include <cmath>
+#include <cstdio>
 #include <algorithm>
 #include <stdexcept>
 
 namespace mpcc {
 
-Plotting::Plotting(double Ts, const PathToJson& path) : Ts_(Ts)
+Plotting::Plotting(double Ts, const PathToJson& path) : Ts_(Ts), cost_param_(path.cost_path)
 {
 }
 
@@ -104,13 +105,16 @@ void Plotting::plotIntercept(const std::vector<State>& ego_log,
                              const std::vector<std::array<double,4>>& motor_log,
                              bool motor_pwm_is_real,
                              const std::vector<std::array<double,3>>& mpc_accel_log,
-                             const std::vector<std::array<double,3>>& pid_accel_log) const
+                             const std::vector<std::array<double,3>>& pid_accel_log,
+                             const std::vector<std::array<double,3>>& ref_pos_log,
+                             const std::vector<std::array<double,3>>& ref_vel_log,
+                             const std::vector<std::array<double,3>>& pid_vel_log) const
 {
     if (ego_log.empty()) return;
 
     std::vector<double> ego_x, ego_y, ego_z, ego_v;
     std::vector<double> target_x, target_y, target_z;
-    std::vector<double> dist, time;
+    std::vector<double> dist, theta_los, time;
 
     double t = 0.0;
     for (size_t i = 0; i < ego_log.size(); ++i) {
@@ -130,6 +134,17 @@ void Plotting::plotIntercept(const std::vector<State>& ego_log,
                                  std::pow(ego_log[i].py - target_log[i].p_t.y(), 2) +
                                  std::pow(ego_log[i].pz - target_log[i].p_t.z(), 2));
             dist.push_back(d);
+
+            // 视线-目标速度夹角（定义与 cost.cpp 一致）：
+            // theta = acos(n_los . v_t / |v_t|)，夹角不可解时按迎面态势 theta=pi 处理
+            const double v_t_norm = target_log[i].v_t.norm();
+            double theta = M_PI;
+            if (d > 1e-3 && v_t_norm > 1e-3) {
+                Eigen::Vector3d r_los = target_log[i].p_t - Eigen::Vector3d(ego_log[i].px, ego_log[i].py, ego_log[i].pz);
+                double cos_theta = std::max(-1.0, std::min(1.0, r_los.normalized().dot(target_log[i].v_t) / v_t_norm));
+                theta = std::acos(cos_theta);
+            }
+            theta_los.push_back(theta);
         }
         time.push_back(t);
         t += Ts_; // 由 MPC 实际采样周期决定时间轴
@@ -277,14 +292,19 @@ void Plotting::plotIntercept(const std::vector<State>& ego_log,
         plt::legend(); plt::grid(true);
 
         // ==========================================
-        // 窗口 7: 我方合速度随敌我相对距离变化
+        // 窗口 7: 视线-目标速度夹角 & 我方合速度随时间变化
+        // 夹角 theta = acos(n_los . v_t / |v_t|)（与 cost.cpp 定义一致）
         // ==========================================
         plt::figure_size(800, 400);
+        std::vector<double> theta_deg;
+        theta_deg.reserve(theta_los.size());
+        for (double th : theta_los) theta_deg.push_back(th * 180.0 / M_PI);
+        plt::plot(time_d, theta_deg, {{"label", "LOS-v_t Angle [deg]"}, {"color", "red"}, {"linewidth", "2"}});
         std::vector<double> ego_v_d(ego_v.begin(), ego_v.begin() + dist.size());
-        plt::plot(dist, ego_v_d, {{"label", "Ego Speed |v|"}, {"color", "blue"}, {"linewidth", "2"}});
+        plt::plot(time_d, ego_v_d, {{"label", "Ego Speed |v| [m/s]"}, {"color", "blue"}, {"linestyle", "-."}, {"linewidth", "2"}});
 
-        plt::title("Window 7: Ego Speed vs Relative Distance");
-        plt::xlabel("Relative Distance [m]"); plt::ylabel("Ego Speed |v| [m/s]");
+        plt::title("Window 7: LOS-Target Velocity Angle & Ego Speed vs Time");
+        plt::xlabel("Time [s]"); plt::ylabel("Angle [deg] / Speed [m/s]");
         plt::legend(); plt::grid(true);
     }
 
@@ -361,7 +381,135 @@ void Plotting::plotIntercept(const std::vector<State>& ego_log,
         plt::xlabel("Time [s]"); // 作用于最后一行子图
     }
 
-    std::cout << "[Geffen Visualizer] Rendering 9 independent windows. Close ALL windows to exit." << std::endl;
+    // ==========================================
+    // 窗口 10: 代价函数各变权重随时间变化
+    // 公式与 cost.cpp getCost() 逐项一致，用日志时刻的敌我几何（rho、theta）重算：
+    //   Q_c       = q_c    * 0.5*(1 - tanh((rho-rho_v)/k_v))          法向位置收敛权重
+    //   Q_vattack = q_vmag * exp(-(theta-pi)^2 / (2*sigma_v^2))       速度大小控制权重
+    //   Q_pn      = q_dv   * 0.5*(1 + tanh((rho-rho_dv)/k_dv))        制导分量控制权重
+    //   Q_vend    = q_v    * 0.5*(1 - tanh((rho-rho_v)/k_v))          末端速度对齐控制权重
+    // 同图叠加缩放后的视线-目标速度夹角与敌我相对距离，缩放比例以权重最大值为参考自适应
+    // ==========================================
+    if (!dist.empty()) {
+        plt::figure_size(900, 450);
+        std::vector<double> time_w(time.begin(), time.begin() + dist.size());
+        std::vector<double> Qc, Qvattack, Qpn, Qvend;
+        Qc.reserve(dist.size()); Qvattack.reserve(dist.size());
+        Qpn.reserve(dist.size()); Qvend.reserve(dist.size());
+        for (size_t i = 0; i < dist.size(); ++i) {
+            const double rho = dist[i];
+            const double w_v_track = 0.5 * (1.0 - std::tanh((rho - cost_param_.rho_v) / cost_param_.k_v));
+            Qc.push_back(cost_param_.q_c * w_v_track);
+            Qvattack.push_back(cost_param_.q_vmag *
+                std::exp(-std::pow(theta_los[i] - M_PI, 2) / (2.0 * cost_param_.sigma_v * cost_param_.sigma_v)));
+            Qpn.push_back(cost_param_.q_dv *
+                0.5 * (1.0 + std::tanh((rho - cost_param_.rho_dv) / cost_param_.k_dv)));
+            Qvend.push_back(cost_param_.q_v * w_v_track);
+        }
+
+        // 参考量级取四条权重的最大值，将夹角(deg)与距离(m)缩放到同量级便于同图观察
+        double w_ref = 0.0;
+        double dist_max = 1e-9;
+        for (size_t i = 0; i < dist.size(); ++i) {
+            w_ref = std::max(std::max(w_ref, Qc[i]), std::max(std::max(Qvattack[i], Qpn[i]), Qvend[i]));
+            dist_max = std::max(dist_max, dist[i]);
+        }
+        const double scale_theta = (w_ref > 0.0) ? (w_ref / 180.0) : 1.0; // 180deg 映射到权重峰值
+        const double scale_dist = (w_ref > 0.0) ? (w_ref / dist_max) : 1.0; // 最大距离映射到权重峰值
+        auto fmt_exp = [](double v) {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%.2e", v);
+            return std::string(buf);
+        };
+
+        std::vector<double> theta_scaled;
+        theta_scaled.reserve(theta_los.size());
+        for (double th : theta_los) theta_scaled.push_back(th * (180.0 / M_PI) * scale_theta);
+        std::vector<double> dist_scaled;
+        dist_scaled.reserve(dist.size());
+        for (double d : dist) dist_scaled.push_back(d * scale_dist);
+
+        plt::plot(time_w, Qc, {{"label", "Q_c (normal pos)"}, {"color", "tab:blue"}, {"linewidth", "2"}});
+        plt::plot(time_w, Qvattack, {{"label", "Q_vattack (speed mag)"}, {"color", "tab:orange"}, {"linewidth", "2"}});
+        plt::plot(time_w, Qpn, {{"label", "Q_pn (guidance)"}, {"color", "tab:green"}, {"linewidth", "2"}});
+        plt::plot(time_w, Qvend, {{"label", "Q_vend (terminal vel align)"}, {"color", "tab:purple"}, {"linewidth", "2"}});
+        plt::plot(time_w, theta_scaled, {{"label", "LOS-v_t Angle [deg] x" + fmt_exp(scale_theta)},
+                                         {"color", "red"}, {"linestyle", "--"}, {"linewidth", "1.5"}});
+        plt::plot(time_w, dist_scaled, {{"label", "Relative Distance [m] x" + fmt_exp(scale_dist)},
+                                        {"color", "black"}, {"linestyle", ":"}, {"linewidth", "1.5"}});
+
+        plt::title("Window 10: Cost Varying Weights vs Time");
+        plt::xlabel("Time [s]"); plt::ylabel("Weight / Scaled Value");
+        plt::legend(); plt::grid(true);
+    }
+
+    // ==========================================
+    // 窗口 11: ENU 三轴速度链对比（9 条曲线）
+    // 测量速度 vs 轨迹插值参考速度 vs PID 总速度指令（前馈+位置环修正）
+    // 颜色区分轴：x=蓝 y=橙 z=绿；线型区分类型：实测=实线 参考=虚线 PID指令=点划线
+    // ==========================================
+    if (!ref_vel_log.empty()) {
+        plt::figure_size(900, 450);
+        size_t n = std::min(ref_vel_log.size(), time.size());
+        std::vector<double> time_r(time.begin(), time.begin() + n);
+        const char* axis_name[3] = {"x", "y", "z"};
+        const char* axis_color[3] = {"tab:blue", "tab:orange", "tab:green"};
+        for (int c = 0; c < 3; ++c) {
+            std::vector<double> meas_v, ref_v, pid_v;
+            meas_v.reserve(n); ref_v.reserve(n); pid_v.reserve(n);
+            for (size_t i = 0; i < n; ++i) {
+                const double meas_comp[3] = {ego_log[i].vx, ego_log[i].vy, ego_log[i].vz};
+                meas_v.push_back(meas_comp[c]);
+                ref_v.push_back(ref_vel_log[i][c]);
+                pid_v.push_back(pid_vel_log[i][c]);
+            }
+            const std::string ax(axis_name[c]);
+            plt::plot(time_r, meas_v, {{"label", "Meas v" + ax},
+                                       {"color", axis_color[c]}, {"linestyle", "-"}, {"linewidth", "1.8"}});
+            plt::plot(time_r, ref_v, {{"label", "Ref v" + ax + " (interp)"},
+                                      {"color", axis_color[c]}, {"linestyle", "--"}, {"linewidth", "1.5"}});
+            plt::plot(time_r, pid_v, {{"label", "PID v" + ax + " cmd"},
+                                      {"color", axis_color[c]}, {"linestyle", "-."}, {"linewidth", "1.2"}});
+
+        }
+
+        plt::title("Window 11: Velocity: Measured vs Ref (interp) vs PID Cmd (ENU)");
+        plt::xlabel("Time [s]"); plt::ylabel("Velocity [m/s]");
+        plt::legend(); plt::grid(true);
+    }
+
+    // ==========================================
+    // 窗口 12: ENU 三轴位置对比（6 条曲线）
+    // 实测位置 vs 轨迹插值参考位置
+    // 颜色区分轴：x=蓝 y=橙 z=绿；线型区分类型：实测=实线 参考=虚线
+    // ==========================================
+    if (!ref_pos_log.empty()) {
+        plt::figure_size(900, 450);
+        size_t n = std::min(ref_pos_log.size(), time.size());
+        std::vector<double> time_r(time.begin(), time.begin() + n);
+        const char* axis_name[3] = {"x", "y", "z"};
+        const char* axis_color[3] = {"tab:blue", "tab:orange", "tab:green"};
+        for (int c = 0; c < 3; ++c) {
+            std::vector<double> meas_p, ref_p;
+            meas_p.reserve(n); ref_p.reserve(n);
+            for (size_t i = 0; i < n; ++i) {
+                const double meas_comp[3] = {ego_log[i].px, ego_log[i].py, ego_log[i].pz};
+                meas_p.push_back(meas_comp[c]);
+                ref_p.push_back(ref_pos_log[i][c]);
+            }
+            const std::string ax(axis_name[c]);
+            plt::plot(time_r, meas_p, {{"label", "Meas p" + ax},
+                                       {"color", axis_color[c]}, {"linestyle", "-"}, {"linewidth", "1.8"}});
+            plt::plot(time_r, ref_p, {{"label", "Ref p" + ax + " (interp)"},
+                                      {"color", axis_color[c]}, {"linestyle", "--"}, {"linewidth", "1.5"}});
+        }
+
+        plt::title("Window 12: Position: Measured vs Ref (interp) (ENU)");
+        plt::xlabel("Time [s]"); plt::ylabel("Position [m]");
+        plt::legend(); plt::grid(true);
+    }
+
+    std::cout << "[Geffen Visualizer] Rendering 12 independent windows. Close ALL windows to exit." << std::endl;
     plt::show();
 }
 
