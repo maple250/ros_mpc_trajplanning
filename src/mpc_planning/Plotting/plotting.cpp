@@ -82,6 +82,25 @@ void plot3_compat(const std::vector<double>& x, const std::vector<double>& y, co
     PyObject_CallObject(sca, sca_args);
 }
 
+// matplotlib-cpp 自带的 plt::subplot 用 PyFloat_FromDouble 传位置参数，
+// matplotlib 3.6 起（宿主机 24.04）浮点位置参数不再被 add_subplot 接受而抛错
+// （容器内 Noetic 的 3.1 仍可）。这里改用整数重写同一调用，两端兼容。
+void subplot_compat(long nrows, long ncols, long plot_number)
+{
+    matplotlibcpp::detail::_interpreter::get();
+
+    PyObject* args = PyTuple_New(3);
+    PyTuple_SetItem(args, 0, PyLong_FromLong(nrows));
+    PyTuple_SetItem(args, 1, PyLong_FromLong(ncols));
+    PyTuple_SetItem(args, 2, PyLong_FromLong(plot_number));
+
+    PyObject* res = PyObject_CallObject(
+        matplotlibcpp::detail::_interpreter::get().s_python_function_subplot, args);
+    Py_DECREF(args);
+    if (!res) throw std::runtime_error("Call to subplot() failed.");
+    Py_DECREF(res);
+}
+
 // matplotlib-cpp 没有 zlabel，补一个（作用于当前 figure 的第一个坐标系）
 void zlabel_compat(const std::string& label)
 {
@@ -351,7 +370,7 @@ void Plotting::plotIntercept(const std::vector<State>& ego_log,
         const char* comp_name[3] = {"ax", "ay", "az"};
         const bool has_pid = (pid_accel_log.size() == mpc_accel_log.size());
         for (int c = 0; c < 3; ++c) {
-            plt::subplot(3, 1, c + 1);
+            subplot_compat(3, 1, c + 1);
 
             std::vector<double> mpc_a, pid_a;
             mpc_a.reserve(n); pid_a.reserve(n);

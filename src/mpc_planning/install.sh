@@ -11,9 +11,12 @@
 #   External/hpipm/lib/include/*.h           静态库头文件
 #   External/hpipm/lib/lib/libhpipm.a        静态库
 #
-# 说明：blasfeo/hpipm 必须在与最终链接一致的工具链下编译
-#       （即容器内 Ubuntu 20.04 + ROS Noetic），故本脚本通常由
-#       Dockerfile 在镜像构建时调用，而非在 24.04 宿主机上运行。
+# 说明：blasfeo/hpipm 必须在与最终链接一致的工具链下编译。两个场景：
+#   1) docker 镜像构建时由 Dockerfile 调用（Ubuntu 20.04 + GCC9，供在线版
+#      mpc_planning_node 容器内 catkin_make 使用）；
+#   2) 宿主机直接运行（Ubuntu 24.04 + GCC13，供离线仿真 mpc_offline_sim
+#      原生 cmake 构建使用）。脚本幂等，产物布局两处一致。
+# 前提：宿主机需已装 cmake、build-essential、python3-dev、python3-numpy。
 # ============================================================
 set -euo pipefail
 

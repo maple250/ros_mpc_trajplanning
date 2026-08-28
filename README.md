@@ -1,19 +1,21 @@
-# MPCC — 无人机 MPC 拦截路径规划器
+# MPCC - 无人机 MPC 拦截路径规划器（离线仿真版）
 
-基于 **质点模型（Mass Point Model）** 的 C++ MPC 路径规划器，用于无人机对空中机动目标的追踪 / 迎头拦截。在 ROS1 (Noetic) 下与 PX4 SITL + Gazebo Classic 仿真器联合运行，机架为默认 `iris`，通过 MAVROS 与飞控通信。
+基于 **质点模型（Mass Point Model）** 的 C++ MPC 路径规划器，用于无人机对空中机动目标的追踪 / 迎头拦截。
 
-## 1. 系统架构
+本分支提供 **离线仿真 `mpc_offline_sim`**：零 ROS / Gazebo / PX4 / MAVROS 依赖，在宿主机上直接构建运行，四旋翼动力学在进程内闭环。在线版（ROS1 Noetic + PX4 SITL + Gazebo，容器环境）见 `feat/docker-build-env` 等分支。
+
+## 1. 离线仿真架构
 
 ```
-mpc_planning_node.cpp          # 主节点：飞行状态机 + 三频率定时器
-├─ 0.5Hz  targetSensorTimer    # 模拟目标传感器（2s 一次观测，含转弯机动）
-├─ 10Hz   mpcPlannerTimer      # KF 融合/预测 + MPC 在线规划 + 到达检测
-└─ 100Hz  controlLoopTimer     # 轨迹时间插值 + 串级 PID -> MAVROS 加速度指令
+offline_sim_node.cpp           # 主程序：飞行状态机 + 三频率节拍（与在线版同构）
+├─ 0.5Hz  目标传感器模拟        # 2s 一次观测，含匀速圆周等机动
+├─ 10Hz   KF 融合/预测 + MPC    # 在线规划 + 到达检测
+└─ 100Hz  控制回路
+     └─ 串级 PID -> AccelToAttitudeController（加速度->姿态+推力，替代 PX4 接口）
+        -> drone_dynamic 姿态外环 + 角速度内环 + 混控 -> 四旋翼动力学（100Hz）
 ```
 
-- **飞行状态机**：`WAIT_FOR_CONNECTION → TAKEOFF → TRACKING_MPC → EMERGENCY_HOVER`
-  （Offboard 丢失或判定拦截成功后自动切换到位置悬停）
-- **多线程**：`AsyncSpinner(3)`，10Hz MPC 求解不阻塞 100Hz 控制回路，`mutex` 保护共享轨迹包
+仿真结束弹出 12 个 matplotlib 分析窗口（与在线版共用同一套绘图代码）。
 
 ## 2. 算法模块
 
@@ -25,30 +27,38 @@ mpc_planning_node.cpp          # 主节点：飞行状态机 + 三频率定时�
 | `目标预测` | Singer 模型：目标加速度按 `exp(-Ts/τ)`（τ=1s）指数衰减，长时域退化为匀速直线 |
 | `Constraints/` | 状态 / 输入 box 约束（位置 ±2000m，速度 ±25m/s，加速度 ±20m/s²）+ 多面体约束 |
 | `Interfaces/` | 基于 **HPIPM / blasfeo** 的 QP 求解接口 |
-| `controller/` | 串级 PID（位置环 → 速度环），对 MPC 轨迹做时间插值跟踪 |
-| `Plotting/` | matplotlib-cpp 事后绘图（节点退出时自动绘制） |
+| `controller/` | 串级 PID（位置环 -> 速度环），对 MPC 轨迹做时间插值跟踪 |
+| `InnerLoop/` | 加速度指令 -> 期望姿态 + 总推力的转换器（含倾角限幅） |
+| `Plotting/` | matplotlib-cpp 事后绘图（程序退出时自动绘制） |
 
-目标参数、代价权重、约束边界均在 `src/mpc_planning/Params/*.json` 中配置；初始场景（目标位置 / 速度等）见 `Params/stateInitialization.json` 与 `mpc_planning_node.cpp`。
+目标参数、代价权重、约束边界均在 `src/mpc_planning/Params/*.json` 中配置；初始场景见 `Params/stateInitialization.json`。四旋翼动力学参数见 `External/drone_dynamic/Params/drone_params.json`。
 
-## 3. 依赖
+## 3. 依赖（宿主机，Ubuntu 24.04 验证通过）
 
-- ROS1 Noetic、PX4 SITL (Gazebo Classic)、MAVROS
-- 第三方库位于 `src/mpc_planning/External/`（**不入版本库**，需自行放置）：
-  Eigen、nlohmann/json、blasfeo、hpipm、matplotlib-cpp
-- 部分依赖可由 `src/mpc_planning/install.sh` 拉取（目前仅 matplotlib-cpp 的克隆生效，blasfeo/hpipm 的编译步骤已注释，需按脚本内注释手动编译为静态库）
-
-## 4. 编译与启动
+- 系统包：`cmake`、`build-essential`、`python3-dev`、`python3-numpy`、`python3-matplotlib`、`python3-tk`（TkAgg 出图需要 X 环境）
+- 第三方库位于 `src/mpc_planning/External/`（**不入版本库**）：Eigen、nlohmann/json、matplotlib-cpp、blasfeo、hpipm、drone_dynamic，由 `install.sh` 自动拉取/编译（幂等）
+- `drone_dynamic` 默认从 `~/drone_ws/drone_dynamic` 本地克隆，缺失时回退 GitHub（maple250/drone_dynamic）
 
 ```bash
-catkin_make                  # 工作空间根目录
-roslaunch mpcplanning intercept_mpc.launch
+sudo apt install cmake build-essential python3-dev python3-numpy \
+                 python3-matplotlib python3-tk
+bash src/mpc_planning/install.sh
 ```
 
-可视化界面可在 `.launch` 文件中修改以下一行开启或关闭（以下为关闭示例，开启改为 `true`）：
+## 4. 构建与运行
 
-```xml
-<arg name="gui" value="false"/>
+```bash
+# 构建（无需 ROS；若环境里有 ROS/catkin，ROS 在线节点也不会被牵连）
+cmake -S src/mpc_planning -B src/mpc_planning/build-native
+cmake --build src/mpc_planning/build-native -j$(nproc)
+
+SIM=src/mpc_planning/build-native/mpc_offline_sim
+$SIM --selftest    # 转换器三断言（悬停/前倾/倾角限幅）后退出
+$SIM --hover-only  # 起飞->悬停5s->+20m 阶跃验证，不接 MPC，不弹窗
+$SIM               # 完整拦截仿真，结束弹 12 个绘图窗口
 ```
+
+用法：`mpc_offline_sim [Params目录] [drone_params.json] [--selftest] [--hover-only]`（参数路径默认为编译期宏，仅在需要换参数时传入）。无头环境跑冒烟可设 `MPLBACKEND=Agg`。
 
 ## 5. 已知局限
 

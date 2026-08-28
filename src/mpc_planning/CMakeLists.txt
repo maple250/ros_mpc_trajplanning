@@ -5,17 +5,20 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -pthread -Wall")
 
 # ==========================================
-# 1. 查找 ROS Catkin 依赖包
+# 1. 查找 ROS Catkin 依赖包（可选：仅在线版 mpc_planning_node 需要）
+#    - 容器/ROS 环境下 catkin_make：两个可执行都构建，行为与历史一致
+#    - 宿主机无 ROS 直接 cmake：跳过 ROS 目标，只构建离线仿真 mpc_offline_sim
 # ==========================================
-find_package(catkin REQUIRED COMPONENTS
+find_package(catkin QUIET COMPONENTS
     roscpp
     nav_msgs
     mavros_msgs
     roslib
 )
-
-# 声明这是一个标准的 ROS 包
-catkin_package()
+if(catkin_FOUND)
+    # 声明这是一个标准的 ROS 包
+    catkin_package()
+endif()
 
 # ==========================================
 # 2. 查找 Python3 (用于 matplotlib-cpp 绘图)
@@ -27,7 +30,6 @@ find_package(Python3 COMPONENTS Development NumPy REQUIRED)
 # ==========================================
 include_directories(
     .
-    ${catkin_INCLUDE_DIRS}
     External/blasfeo/lib/include    # install.sh 将 blasfeo 装到 External/blasfeo/lib，头文件在其 include/ 下（扁平）
     External/hpipm/lib/include      # 同理，hpipm 装到 External/hpipm/lib
     External/matplotlib
@@ -35,11 +37,15 @@ include_directories(
     External/Json/include
     ${Python3_INCLUDE_DIRS}
 )
+if(catkin_FOUND)
+    include_directories(${catkin_INCLUDE_DIRS})
+endif()
 
 # ==========================================
-# 4. 编译可执行文件 (ROS Node)
+# 4. 编译可执行文件 (ROS Node，仅 catkin 环境下构建)
 # ==========================================
 # 【核心替换】去掉了 main.cpp，换成了 mpcc_ros_node.cpp，可执行文件命名为 mpcc_node
+if(catkin_FOUND)
 add_executable(mpc_planning_node
         mpc_planning_node.cpp
         KFfilter/KFfilter.cpp
@@ -67,6 +73,7 @@ target_link_libraries(mpc_planning_node
         ${PROJECT_SOURCE_DIR}/External/hpipm/lib/lib/libhpipm.a
         ${PROJECT_SOURCE_DIR}/External/blasfeo/lib/lib/libblasfeo.a
 )
+endif()
 
 # ==========================================
 # 6. drone_dynamic 动力学库接入（离线仿真 mpc_offline_sim 用）

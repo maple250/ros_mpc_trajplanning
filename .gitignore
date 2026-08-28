@@ -1,3 +1,5 @@
 build/
 devel/
+build-native/
 src/mpc_planning/External/
+*.zip
