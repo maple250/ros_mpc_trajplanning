@@ -80,6 +80,19 @@ else
     cmake --install "$EXT/hpipm/build"
 fi
 
+echo "########## 6/6 动力学库：drone_dynamic（离线仿真 mpc_offline_sim 用） ##########"
+# docker build 时该目录已随 COPY 进入镜像，本步仅作缺失兜底：
+# 优先从同机检出克隆（git clone 自动排除 build/），否则走 GitHub 仓库
+if [ -f "$EXT/drone_dynamic/CMakeLists.txt" ]; then
+    echo "[skip] drone_dynamic 已就位: $EXT/drone_dynamic"
+elif git clone --depth 1 "$HOME/drone_ws/drone_dynamic" "$EXT/drone_dynamic" 2>/dev/null; then
+    echo "[ok] 从本地检出克隆: $HOME/drone_ws/drone_dynamic"
+else
+    git clone --depth 1 git@github.com:maple250/drone_dynamic.git "$EXT/drone_dynamic"
+    echo "[ok] 从 GitHub 克隆: maple250/drone_dynamic"
+fi
+
 echo "########## 完成 ##########"
 echo "blasfeo: $EXT/blasfeo/lib/lib/libblasfeo.a"
 echo "hpipm:   $EXT/hpipm/lib/lib/libhpipm.a"
+echo "drone_dynamic: $EXT/drone_dynamic"
