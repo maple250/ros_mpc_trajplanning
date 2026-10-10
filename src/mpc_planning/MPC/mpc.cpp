@@ -127,7 +127,7 @@ TrackPackage MPC::runInterceptMPC(const State &x0, const TargetState &target_cur
 void MPC::logData(const State &x, const TargetState &target, const TrackPackage &plan,
                   const std::array<double,4> &motor_pwm, const std::array<double,3> &pid_accel,
                   const std::array<double,3> &pid_ref_pos, const std::array<double,3> &pid_ref_vel,
-                  const std::array<double,3> &pid_vel)
+                  const std::array<double,3> &pid_vel, const std::array<double,3> &accel_meas)
 {
     // 降采样记录规划轨迹
     ego_log.push_back(x);
@@ -148,8 +148,9 @@ void MPC::logData(const State &x, const TargetState &target, const TrackPackage 
     ref_pos_log.push_back(pid_ref_pos);
     ref_vel_log.push_back(pid_ref_vel);
     pid_vel_log.push_back(pid_vel);
-    // 电机数据：优先使用飞控真实 PWM 反馈(/mavros/rc/out)；
-    // 反馈为全零时，用当前时刻 MPC 加速度指令经简化分配模型估算
+    accel_meas_log.push_back(accel_meas);
+    // 电机数据：优先使用真实 PWM（动力学状态换算）；
+    // 输入为全零时，用当前时刻 MPC 加速度指令经简化分配模型估算
     const bool has_real = motor_pwm[0] != 0.0 || motor_pwm[1] != 0.0 ||
                           motor_pwm[2] != 0.0 || motor_pwm[3] != 0.0;
     if (has_real) {
@@ -167,18 +168,8 @@ void MPC::logPlot(const double Ts_, const PathToJson &json_paths)
 {
     Plotting plotter(Ts_, json_paths);
     plotter.plotIntercept(ego_log, target_log, plan_log, motor_log, motor_pwm_is_real_,
-                          mpc_accel_log, pid_accel_log, ref_pos_log, ref_vel_log, pid_vel_log);
-}
-void MPC::reached_detection(const State &x, const TargetState &x_t, double offboard_time_, const PathToJson &json_paths)
-{
-    double dist = (Eigen::Vector3d(x.px, x.py, x.pz) - x_t.p_t).norm();
-    double Vel = Eigen::Vector3d(x.vx, x.vy, x.vz).norm();
-    std::cout << "Time: " << offboard_time_ << "s | Dist: " << dist << "m | Vel: " << Vel << "m/s" << std::endl;
-    if (dist <= 350.0) {
-        std::cout << "[TARGET REACHED]" << std::endl;
-        traj_finish = true;
-        logPlot(Ts_,json_paths);
-    }
+                          mpc_accel_log, pid_accel_log, ref_pos_log, ref_vel_log, pid_vel_log,
+                          accel_meas_log, pwm_lim_);
 }
 //MPC-solver输入配置：输入“单步”的状态-输入，输出Stage结构体
 void MPC::setStage(const State &xk, const Input &uk, const TargetState &target_pred, const Eigen::Vector3d &n_t, const int time_step)

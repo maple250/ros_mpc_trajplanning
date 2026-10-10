@@ -12,8 +12,7 @@
 #   External/hpipm/lib/lib/libhpipm.a        静态库
 #
 # 说明：blasfeo/hpipm 必须在与最终链接一致的工具链下编译。两个场景：
-#   1) docker 镜像构建时由 Dockerfile 调用（Ubuntu 20.04 + GCC9，供在线版
-#      mpc_planning_node 容器内 catkin_make 使用）；
+#   1) docker 镜像构建时由 Dockerfile 调用（Ubuntu 20.04 + GCC9）；
 #   2) 宿主机直接运行（Ubuntu 24.04 + GCC13，供离线仿真 mpc_offline_sim
 #      原生 cmake 构建使用）。脚本幂等，产物布局两处一致。
 # 前提：宿主机需已装 cmake、build-essential、python3-dev、python3-numpy。

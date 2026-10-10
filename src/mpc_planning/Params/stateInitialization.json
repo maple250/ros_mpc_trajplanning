@@ -1,13 +1,13 @@
 
 {
-  "pxt_init": 1500,
-  "pyt_init": 1200,
+  "pxt_init": 1700,
+  "pyt_init": 1300,
   "pzt_init": 150,
-  "vht_init": 30,
+  "vht_init": 20,
   "vzt_init": 0.0,
-  "theta_init": 135.0,
+  "theta_init": -50.0,
   "movetype_init": 2,
-  "Rt_init": 250,
+  "Rt_init": 350,
 
   "pxs_init": 0.0,
   "pys_init": 0.0,

@@ -1,9 +1,9 @@
 //类特点：加速度指令 -> 姿态+推力设定 转换器（离线仿真 mpc_offline_sim 的"飞控内环"入口，
 //       独立控制器文件，与 drone_dynamic 的 rate_controller/attitude_controller 同风格：无状态纯函数）
-//算法：几何法（与 PX4 mc_pos_control 同源）——期望总比力 f_des = a_des + g·e3（ENU），
+//算法：几何法——期望总比力 f_des = a_des + g·e3（ENU），
 //      机体 z 轴对准 f_des 方向，航向由 x_c=[cos(yaw),sin(yaw),0] 张成，构造 R_des 后经
 //      drone_dynamic::Frames 转 ZYX 欧拉角（FLU 语义，正 pitch=低头）；推力比力 = ||f_des||
-//约定：输入 a_des 为"不含重力"的机动加速度（与在线版 MAVROS setpoint_raw 加速度语义一致），
+//约定：输入 a_des 为"不含重力"的机动加速度，
 //      单位 m/s²（与 drone_dynamic 质量归一化比力同量纲，零换算）；
 //      倾角限幅防指令超权限（超限时水平分量等比缩放，垂向保持）
 #ifndef MPCC_ACCEL_TO_ATTITUDE_CONTROLLER_H

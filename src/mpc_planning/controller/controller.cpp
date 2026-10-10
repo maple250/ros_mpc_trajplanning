@@ -211,8 +211,8 @@ namespace mpcc {
             Eigen::Vector3d final_acc = control_output.Acc_enu;
             drone_ctrl.acceleration_command[0] = LimitValue(final_acc(0), -15.0, 15.0);
             drone_ctrl.acceleration_command[1] = LimitValue(final_acc(1), -15.0, 15.0);
-            // 垂向更保守（与实机部署版一致）
-            drone_ctrl.acceleration_command[2] = LimitValue(final_acc(2), -7.0, 7.0);
+            // 垂向与 MPC bounds az（±8）对齐，不再额外压低
+            drone_ctrl.acceleration_command[2] = LimitValue(final_acc(2), -8.0, 8.0);
             
         } else if (mode_type == 2) {
             // Case: Landing_tracking (速度控制)
@@ -251,9 +251,9 @@ namespace mpcc {
     void PIDcontroller::PositionLoop()
     {
         Eigen::Vector3d pos_err = state_ref.Pos_enu - state_feedbk.Pos_enu;
-        // 设定无人机水平和垂向的最大物理追踪加速度（根据无人机动力学微调）
-        const double max_accel_xy = 8.0;
-        const double max_accel_z = 5.0;
+        // 设定无人机水平和垂向的最大物理追踪加速度（与机动能力匹配，原 8.0/5.0 偏保守）
+        const double max_accel_xy = 12.0;
+        const double max_accel_z = 6.0;
         Eigen::Vector3d vel_correction;
         vel_correction(0) = SqrtController(pos_err(0), pos_param_.kp(0), max_accel_xy);
         vel_correction(1) = SqrtController(pos_err(1), pos_param_.kp(1), max_accel_xy);
@@ -274,9 +274,9 @@ namespace mpcc {
         vel_err_integral_ += vel_err * Ts_;
         // 抗积分饱和
         vel_err_integral_ = vel_err_integral_.cwiseMax(-vel_param_.integral_lim).cwiseMin(vel_param_.integral_lim);
-        //有无加速度前馈
-        // Eigen::Vector3d acc_cmd =state_ref.Acc_enu + vel_param_.kp.cwiseProduct(vel_err) + vel_param_.ki.cwiseProduct(vel_err_integral_) + vel_param_.kd.cwiseProduct(dvel_err);
-        Eigen::Vector3d acc_cmd = vel_param_.kp.cwiseProduct(vel_err) + vel_param_.ki.cwiseProduct(vel_err_integral_) + vel_param_.kd.cwiseProduct(dvel_err);
+        // 加速度前馈 + 速度误差 PID：MPC 轨迹插值的参考加速度（state_ref.Acc_enu）
+        // 直接进入指令，PID 仅负责修正误差——避免"指令=0.7×速度误差"导致的稳态滞后
+        Eigen::Vector3d acc_cmd = state_ref.Acc_enu + vel_param_.kp.cwiseProduct(vel_err) + vel_param_.ki.cwiseProduct(vel_err_integral_) + vel_param_.kd.cwiseProduct(dvel_err);
         control_output.Acc_enu = acc_cmd;//给最终输出赋值：期望加速度
         prev_vel_err_ = vel_err;
     }

@@ -127,7 +127,9 @@ void Plotting::plotIntercept(const std::vector<State>& ego_log,
                              const std::vector<std::array<double,3>>& pid_accel_log,
                              const std::vector<std::array<double,3>>& ref_pos_log,
                              const std::vector<std::array<double,3>>& ref_vel_log,
-                             const std::vector<std::array<double,3>>& pid_vel_log) const
+                             const std::vector<std::array<double,3>>& pid_vel_log,
+                             const std::vector<std::array<double,3>>& accel_meas_log,
+                             const std::array<double,2>& pwm_lim) const
 {
     if (ego_log.empty()) return;
 
@@ -343,8 +345,11 @@ void Plotting::plotIntercept(const std::vector<State>& ego_log,
             plt::plot(time_m, pwm_m, {{"label", motor_names[m]}, {"color", motor_colors[m]}, {"linewidth", "1.5"}});
         }
 
+        // 模型物理转速极限参考线：w_min（怠速）/ w_max（满转）经 PWM 映射换算（红色虚线）
+        plt::axhline(pwm_lim[0], 0.0, 1.0, {{"color", "red"}, {"linestyle", "--"}, {"linewidth", "1.5"}, {"label", "PWM min (w_min)"}});
+        plt::axhline(pwm_lim[1], 0.0, 1.0, {{"color", "red"}, {"linestyle", "--"}, {"linewidth", "1.5"}, {"label", "PWM max (w_max)"}});
         plt::title(std::string("Window 8: Motor PWM vs Time (") +
-                   (motor_pwm_is_real ? "feedback: /mavros/rc/out" : "estimated from MPC accel command") + ")");
+                   (motor_pwm_is_real ? "real PWM feedback" : "estimated from MPC accel command") + ")");
         plt::xlabel("Time [s]"); plt::ylabel("Motor PWM [us]");
         plt::legend(); plt::grid(true);
     }
@@ -358,40 +363,38 @@ void Plotting::plotIntercept(const std::vector<State>& ego_log,
         size_t n = std::min(mpc_accel_log.size(), time.size());
         std::vector<double> time_a(time.begin(), time.begin() + n);
 
-        // 实际加速度响应：由速度反馈差分 (v[k]-v[k-1])/Ts 得到
-        std::vector<double> acc_resp[3], time_resp;
-        for (size_t i = 1; i < ego_log.size(); ++i) {
-            acc_resp[0].push_back((ego_log[i].vx - ego_log[i-1].vx) / Ts_);
-            acc_resp[1].push_back((ego_log[i].vy - ego_log[i-1].vy) / Ts_);
-            acc_resp[2].push_back((ego_log[i].vz - ego_log[i-1].vz) / Ts_);
-            time_resp.push_back(i * Ts_);
-        }
+        // 反馈加速度：加速度计模拟测量值（含推力+气动阻力等全部非重力外力），
+        // 由机体系比力经姿态旋转到惯性系(ENU)后记录，非速度差分近似。
+        // 垂向扣除重力：ENU 惯性系下重力纯沿 -z，f_z - g 即真实运动加速度，
+        // 扣除后与不含重力的机动加速度指令曲线同语义可比（悬停稳态 az≈0）
+        const bool has_pid = (pid_accel_log.size() == mpc_accel_log.size());
+        const bool has_meas = (accel_meas_log.size() == mpc_accel_log.size());
 
         const char* comp_name[3] = {"ax", "ay", "az"};
-        const bool has_pid = (pid_accel_log.size() == mpc_accel_log.size());
         for (int c = 0; c < 3; ++c) {
             subplot_compat(3, 1, c + 1);
 
-            std::vector<double> mpc_a, pid_a;
-            mpc_a.reserve(n); pid_a.reserve(n);
+            std::vector<double> mpc_a, pid_a, meas_a;
+            mpc_a.reserve(n); pid_a.reserve(n); meas_a.reserve(n);
             for (size_t i = 0; i < n; ++i) {
                 mpc_a.push_back(mpc_accel_log[i][c]);
                 pid_a.push_back(has_pid ? pid_accel_log[i][c] : 0.0);
+                meas_a.push_back(has_meas ? accel_meas_log[i][c] - (c == 2 ? gravity : 0.0) : 0.0);
             }
 
             // 图例只在第一行标注一次
             std::map<std::string, std::string> kw_mpc = {{"color", "blue"}, {"linewidth", "2"}};
             std::map<std::string, std::string> kw_pid = {{"color", "darkorange"}, {"linestyle", "--"}, {"linewidth", "2"}};
-            std::map<std::string, std::string> kw_rsp = {{"color", "green"}, {"linestyle", "-."}, {"linewidth", "1.5"}};
+            std::map<std::string, std::string> kw_meas = {{"color", "green"}, {"linestyle", "-."}, {"linewidth", "1.5"}};
             if (c == 0) {
                 kw_mpc["label"] = "MPC Accel Cmd";
                 kw_pid["label"] = "PID Smoothed Cmd";
-                kw_rsp["label"] = "Actual Accel (v diff)";
-                plt::title("Window 9: Accel Chain: MPC Cmd vs PID Smoothed Cmd vs Actual Response");
+                kw_meas["label"] = "IMU Accel Meas (g-compensated, ENU)";
+                plt::title("Window 9: Accel Chain: MPC Cmd vs PID Smoothed Cmd vs IMU Measured Accel (ENU)");
             }
             plt::plot(time_a, mpc_a, kw_mpc);
             plt::plot(time_a, pid_a, kw_pid);
-            plt::plot(time_resp, acc_resp[c], kw_rsp);
+            plt::plot(time_a, meas_a, kw_meas);
 
             plt::ylabel(std::string(comp_name[c]) + " [m/s^2]");
             plt::grid(true);
@@ -534,9 +537,9 @@ void Plotting::plotIntercept(const std::vector<State>& ego_log,
 
 std::array<double,4> estimateMotorPWM(const Input& a_cmd)
 {
-    // X 型四旋翼简化推力分配模型（PX4 iris 输出序号：M1前右 M2后左 M3前左 M4后右）
+    // X 型四旋翼简化推力分配模型（iris 布局输出序号：M1前右 M2后左 M3前左 M4后右）
     // 假设：
-    //  1) MAVROS 加速度指令为机动加速度，比力 f = a_cmd + g·ez（ENU, z 向上）
+    //  1) 加速度指令为不含重力的机动加速度，比力 f = a_cmd + g·ez（ENU, z 向上）
     //  2) 机体 z 轴对准 f 方向 => 得到滚转/俯仰指令；偏航不参与分配
     //  3) 总推力以悬停推力(mg)为单位，满油门推重比按 2.5 计
     //  4) 滚转>0(右倾) => 右侧电机减速；俯仰>0(抬头) => 前侧电机加速

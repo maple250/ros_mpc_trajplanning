@@ -62,20 +62,21 @@ public:
     MPC();
     MPC(int n_sqp, int n_reset, double sqp_mixing, double Ts, const PathToJson &path);
     int solver_status = -1;
-    bool traj_finish = false;// --- 跟踪状态标志位 ---
     InitialParam state_param_;
     TrackPackage runInterceptMPC(const State &x0, const TargetState &target_current, double offboard_time);
-    // motor_pwm: 飞控最新四电机 PWM 反馈(µs)，无反馈时传全零（内部降级为指令估算）
+    // motor_pwm: 最新四电机 PWM(µs)（动力学状态换算），无反馈时传全零（内部降级为指令估算）
     // pid_accel: 底层 PID 平滑后的加速度指令（ENU）
     // pid_ref_pos / pid_ref_vel: 底层 PID 按时刻插值得到的参考位置/速度（ENU）
     // pid_vel: PID 输出的总速度指令（前馈 + 位置环修正，ENU）
+    // accel_meas: 加速度计模拟测量比力（ENU，含推力+气动阻力等全部非重力外力）
     void logData(const State &x, const TargetState &target, const TrackPackage &plan,
                  const std::array<double,4> &motor_pwm, const std::array<double,3> &pid_accel,
                  const std::array<double,3> &pid_ref_pos, const std::array<double,3> &pid_ref_vel,
-                 const std::array<double,3> &pid_vel);
+                 const std::array<double,3> &pid_vel, const std::array<double,3> &accel_meas);
     // void logPlot();
     void logPlot(const double Ts_, const PathToJson &json_paths);
-    void reached_detection(const State &x, const TargetState &x_t, double offboard_time_, const PathToJson &json_paths);
+    // 窗口8 PWM 参考线：由动力学模型物理转速极限（w_min/w_max）换算，离线主程序设置
+    void setPwmLimits(const std::array<double,2> &lim) { pwm_lim_ = lim; }
 private:
     bool valid_initial_guess_;
     std::array<Stage, N + 1> stages_;////优化输入：预测时域内每个时间步的结构体数组
@@ -112,13 +113,15 @@ private:
     std::vector<TargetState> target_log;
     std::vector<TrackPackage> plan_log;
     std::vector<std::array<double,4>> motor_log; // 四电机 PWM(µs)，与 ego_log 同频
-    bool motor_pwm_is_real_ = false;             // true=来自 /mavros/rc/out 反馈，false=指令估算
+    bool motor_pwm_is_real_ = false;             // true=真实 PWM 反馈，false=指令估算
     std::array<double,4> last_real_pwm_ = {0, 0, 0, 0}; // 反馈偶尔丢帧时保持上一帧
     std::vector<std::array<double,3>> mpc_accel_log; // MPC 每步输出的首点加速度指令（ENU）
     std::vector<std::array<double,3>> pid_accel_log; // 底层 PID 平滑后的加速度指令（10Hz 采样）
     std::vector<std::array<double,3>> ref_pos_log;   // PID 轨迹插值参考位置（ENU，与 ego_log 同频）
     std::vector<std::array<double,3>> ref_vel_log;   // PID 轨迹插值参考速度（ENU，与 ego_log 同频）
     std::vector<std::array<double,3>> pid_vel_log;   // PID 总速度指令（前馈+位置环修正，ENU，与 ego_log 同频）
+    std::vector<std::array<double,3>> accel_meas_log; // 加速度计模拟测量比力（ENU，含推力+气动阻力，不含重力）
+    std::array<double,2> pwm_lim_ = {1000.0, 2000.0}; // 窗口8参考线：模型物理转速极限对应的 PWM [min, max]
     int step_counter = 0; // 用于降采样记录规划轨迹
 };
 

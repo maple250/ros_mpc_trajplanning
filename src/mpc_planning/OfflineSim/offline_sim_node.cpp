@@ -1,13 +1,12 @@
 // ============================================================
-// 离线拦截仿真主程序（无 ROS/Gazebo/PX4/MAVROS 依赖）
+// 离线拦截仿真主程序（纯 cmake 构建运行，无外部中间件依赖）
 //
 // 链路：目标模拟(0.5Hz) → KF → MPC(10Hz) → PID(100Hz)
-//       → AccelToAttitudeController（加速度→姿态+推力，替代 PX4 位置/加速度接口）
+//       → AccelToAttitudeController（加速度→姿态+推力）
 //       → drone_dynamic 姿态外环 + 角速度内环 + 混控 → 四旋翼动力学（100Hz）
 //
-// 状态机/三频率节拍/目标机动/logData 日志项与在线版 mpc_planning_node.cpp
-// 完全同构，仅把 "MAVROS→PX4→Gazebo" 替换为进程内动力学闭环；
-// 12 窗 matplotlib 绘图（MPC::logPlot）与在线版共用同一套代码，模式不变。
+// 状态机/三频率节拍/目标机动/logData 日志项同构；退出时经 MPC::logPlot
+// 统一绘制 12 个 matplotlib 分析窗口。
 //
 // 用法：mpc_offline_sim [Params目录] [drone_params.json] [--selftest] [--hover-only]
 //   --selftest    : 转换器三断言自检（悬停/前倾/倾角限幅）后退出
@@ -41,9 +40,9 @@ namespace {
 constexpr double kCtrlDt        = 0.01;  // 100Hz 主心跳（与在线 PID 同频、drone_dynamic 默认积分步长）
 constexpr int    kTickTarget    = 200;   // 0.5Hz 目标模拟（每 200 拍）
 constexpr int    kTickMpc       = 10;    // 10Hz MPC+KF（每 10 拍）
-constexpr double kTotalTime     = 60.0;  // 兜底仿真时长 [s]
+constexpr double kTotalTime     = 150.0;  // 兜底仿真时长 [s]
 constexpr double kHoverHoldTime = 10.0;  // EMERGENCY_HOVER 持续时长 [s]
-constexpr double kReachDist     = 350.0; // 交接距离（与 MPC::reached_detection 阈值一致）
+constexpr double kReachDist     = 350.0; // 交接距离 [m]
 constexpr double kFcuConnectTime = 0.5;  // 模拟 FCU connected 时刻 [s]
 constexpr double kFcuArmTime     = 1.5;  // 模拟 armed+OFFBOARD 时刻 [s]
 constexpr double kTakeoffBand   = 0.25;  // 起飞入带阈值 [m]（同在线 L303）
@@ -55,7 +54,7 @@ constexpr double kHoverTestEnd  = 15.0;
 constexpr int kPlotSlotFromDd[4] = {1, 2, 3, 0}; // 槽0←dd[2] 槽1←dd[3] 槽2←dd[4] 槽3←dd[1]
 }
 
-//飞行状态机（与在线版一致的四个阶段；DONE 供主循环退出；HOVER_TEST 供 --hover-only）
+//飞行状态机（DONE 供主循环退出；HOVER_TEST 供 --hover-only）
 enum class FlightState {
     WAIT_FOR_CONNECTION,
     TAKEOFF,
@@ -96,7 +95,7 @@ static int runSelfTest(double gravity) {
 }
 
 int main(int argc, char** argv) {
-    // ---------- 参数与模式解析（无 roslib：编译期宏 + 位置参数覆盖） ----------
+    // ---------- 参数与模式解析（编译期宏 + 位置参数覆盖） ----------
     std::string params_dir = MPC_PARAMS_DIR;
     std::string drone_json = DRONE_PARAMS_JSON;
     bool selftest = false, hover_only = false;
@@ -130,7 +129,7 @@ int main(int argc, char** argv) {
 
     MPC mpc(1, 5, 1.0, Ts, json_paths);
 
-    // 目标初值与运动模式（照在线 L72-86：1 匀速直线；2 匀速圆周 omega=Vh/R）
+    // 目标初值与运动模式（1 匀速直线；2 匀速圆周 omega=Vh/R）
     Eigen::Vector3d true_target_p = mpc.state_param_.Pos_target_init;
     Eigen::Vector3d true_target_v = mpc.state_param_.Vel_target_init;
     const int target_movetype = mpc.state_param_.Target_movetype;
@@ -158,11 +157,17 @@ int main(int argc, char** argv) {
     drone_dynamic::Mixer mixer(P.model, P.mixer);
     AccelToAttitudeController accel2att(P.model.gravity);
 
+    // 窗口8 PWM 参考线：模型物理转速极限（w_min 怠速 / w_max 满转）按离线 PWM 映射换算
+    // （PWM = 1000 + 1000·W/w_max_n，与下方电机 PWM 真值换算同轴）
+    const drone_dynamic::MotorParam &motor_p = P.model.motor;
+    mpc.setPwmLimits({1000.0 + 1000.0 * motor_p.wMin / motor_p.wMaxN,
+                      1000.0 + 1000.0 * motor_p.wMax / motor_p.wMaxN});
+
     if (selftest) {
         return runSelfTest(P.model.gravity) == 0 ? 0 : 1;
     }
 
-    // 初值：悬停配平状态（电机已处悬停转速），从地面出发，起飞到 Pos_self_init（同在线 iris 时序）
+    // 初值：悬停配平状态（电机已处悬停转速），从地面出发，起飞到 Pos_self_init
     drone_dynamic::DroneState x = dyn.hoverState();
     x.pos.x = 0.0; x.pos.y = 0.0; x.pos.z = 0.0;
 
@@ -185,11 +190,12 @@ int main(int argc, char** argv) {
     mpcc::State mpc_ego_state;
     mpc_ego_state.setZero();
 
-    // 100Hz 控制量缓存（供 10Hz logData 采样，同在线 pid_accel_cmd_ 等）
-    std::array<double,3> last_pid_accel = {0, 0, 0};
-    std::array<double,3> last_ref_pos   = {0, 0, 0};
-    std::array<double,3> last_ref_vel   = {0, 0, 0};
-    std::array<double,3> last_pid_vel   = {0, 0, 0};
+    // 100Hz 控制量缓存（供 10Hz logData 采样）
+    std::array<double,3> last_pid_accel  = {0, 0, 0};
+    std::array<double,3> last_ref_pos    = {0, 0, 0};
+    std::array<double,3> last_ref_vel    = {0, 0, 0};
+    std::array<double,3> last_pid_vel    = {0, 0, 0};
+    std::array<double,3> last_accel_meas = {0, 0, 0}; // 加速度计模拟测量比力（ENU，含全部非重力外力）
 
     std::cout << "[offline] Simulation start. Total time limit " << kTotalTime << "s."
               << " (movetype=" << target_movetype << ")" << std::endl;
@@ -209,7 +215,7 @@ int main(int argc, char** argv) {
             has_new_target_meas = true;
         }
 
-        // ============ 反馈状态更新（TRACKING 阶段，照在线 odomCallback） ============
+        // ============ 反馈状态更新（TRACKING 阶段） ============
         if (state == FlightState::TRACKING_MPC) {
             ego_fbk.Pos_enu = Eigen::Vector3d(x.pos.x, x.pos.y, x.pos.z);
             ego_fbk.Vel_enu = Eigen::Vector3d(x.vel.vx, x.vel.vy, x.vel.vz);
@@ -217,9 +223,16 @@ int main(int argc, char** argv) {
             ego_fbk.EulerAngles = Eigen::Vector3d(att_meas.roll, att_meas.pitch, att_meas.yaw);
             mpc_ego_state.px = x.pos.x; mpc_ego_state.py = x.pos.y; mpc_ego_state.pz = x.pos.z;
             mpc_ego_state.vx = x.vel.vx; mpc_ego_state.vy = x.vel.vy; mpc_ego_state.vz = x.vel.vz;
+            // 加速度计模拟测量：机体系比力（推力+气动阻力等全部非重力外力，质量归一化）
+            // 经四元数旋转到惯性系(ENU)；比力语义下悬停稳态读数 az≈+g
+            const drone_dynamic::BodyForce acc_b = dyn.getAccelerometer(x);
+            const double acc_b_arr[3] = {acc_b.fx, acc_b.fy, acc_b.fz};
+            double acc_e_arr[3];
+            drone_dynamic::rotateBodyToWorld(x.quat, acc_b_arr, acc_e_arr);
+            last_accel_meas = {acc_e_arr[0], acc_e_arr[1], acc_e_arr[2]};
         }
 
-        // ============ 10Hz MPC 宏观规划（照在线 mpcPlannerTimer，但不调 reached_detection） ============
+        // ============ 10Hz MPC 宏观规划 ============
         if (state == FlightState::TRACKING_MPC && tick % kTickMpc == 0) {
             const double offboard_time = t - start_track_time;
             // KF 数据融合与演进
@@ -234,7 +247,7 @@ int main(int argc, char** argv) {
             target_kf.v_t = kf.getVelocity();
             target_kf.a_t = kf.getAcceleration();
 
-            // 运行 MPC 并记录（8 参数 logData，与在线 L251-252 同构）
+            // 运行 MPC 并记录
             TrackPackage traj_pack = mpc.runInterceptMPC(mpc_ego_state, target_kf, offboard_time);
             // 电机 PWM 真值：归一化转速状态→油门→µs（悬停对应约 1500µs），按下标重排对齐窗口8标签
             std::array<double,4> pwm{};
@@ -242,10 +255,10 @@ int main(int argc, char** argv) {
                 pwm[s] = 1000.0 + 1000.0 * (x.motor.w[kPlotSlotFromDd[s]] + 1.0) / 2.0;
             }
             mpc.logData(mpc_ego_state, target_kf, traj_pack, pwm, last_pid_accel,
-                        last_ref_pos, last_ref_vel, last_pid_vel);
+                        last_ref_pos, last_ref_vel, last_pid_vel, last_accel_meas);
             shared_track_pkg = traj_pack;
 
-            // 触达检测：自算 dist（不调 MPC::reached_detection，其内部会阻塞弹窗，离线版统一退出时画）
+            // 触达检测：自算 dist，达到交接距离后转悬停（绘图统一在退出时进行）
             const double dist = (Eigen::Vector3d(x.pos.x, x.pos.y, x.pos.z) - target_kf.p_t).norm();
             const double vel = ego_fbk.Vel_enu.norm();
             std::cout << "Time: " << offboard_time << "s | Dist: " << dist << "m | Vel: " << vel << "m/s" << std::endl;
@@ -257,7 +270,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        // ============ 100Hz 状态机控制律（照在线 controlLoopTimer） ============
+        // ============ 100Hz 状态机控制律 ============
         Eigen::Vector3d a_cmd = Eigen::Vector3d::Zero();
         double yaw_sp = 0.0;
 
@@ -268,7 +281,7 @@ int main(int argc, char** argv) {
             }
         }
         else if (state == FlightState::TAKEOFF || state == FlightState::EMERGENCY_HOVER || state == FlightState::HOVER_TEST) {
-            // 位置P→速度限幅→机动加速度（在线版此阶段发位置 setpoint 给 PX4 位置环，离线版内联实现）
+            // 位置P→速度限幅→机动加速度（内联位置环实现）
             const Eigen::Vector3d p_des = (state == FlightState::TAKEOFF) ? takeoff_pos : hover_pos;
             const Eigen::Vector3d p(x.pos.x, x.pos.y, x.pos.z);
             const Eigen::Vector3d v(x.vel.vx, x.vel.vy, x.vel.vz);
@@ -277,7 +290,7 @@ int main(int argc, char** argv) {
             a_cmd = vel_p.kp.cwiseProduct(v_des - v);
 
             if (state == FlightState::TAKEOFF) {
-                // armed+OFFBOARD 后才判定入带（照在线 L303）
+                // armed 后才判定入带
                 if (t >= kFcuArmTime && std::fabs(x.pos.z - takeoff_pos.z()) < kTakeoffBand) {
                     if (hover_only) {
                         std::cout << "[offline] Takeoff complete. HOVER_TEST begin." << std::endl;
@@ -288,7 +301,7 @@ int main(int argc, char** argv) {
                         std::cout << "[offline] Takeoff complete. Switching to MPC Tracking Mode." << std::endl;
                         start_track_time = t;
                         pid.Reset();
-                        rate_ctrl.reset(); // 清姿态内环积分记忆，防切换瞬间污染（对应在线 pid.Reset）
+                        rate_ctrl.reset(); // 清姿态内环积分记忆，防切换瞬间污染
                         state = FlightState::TRACKING_MPC;
                     }
                 }
@@ -307,7 +320,7 @@ int main(int argc, char** argv) {
             if (shared_track_pkg.track_number > 0) {
                 const double offboard_time = t - start_track_time;
                 FCUControlProtocol drone_ctrl;
-                // 1 = 加速度控制模式（同在线 L324）
+                // 1 = 加速度控制模式
                 pid.ConductPID(shared_track_pkg, Eigen::Vector3d::Zero(), ego_fbk, offboard_time, 1, drone_ctrl);
                 for (int i = 0; i < 3; ++i) {
                     last_pid_accel[i] = drone_ctrl.acceleration_command[i];

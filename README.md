@@ -2,20 +2,20 @@
 
 基于 **质点模型（Mass Point Model）** 的 C++ MPC 路径规划器，用于无人机对空中机动目标的追踪 / 迎头拦截。
 
-本分支提供 **离线仿真 `mpc_offline_sim`**：零 ROS / Gazebo / PX4 / MAVROS 依赖，在宿主机上直接构建运行，四旋翼动力学在进程内闭环。在线版（ROS1 Noetic + PX4 SITL + Gazebo，容器环境）见 `feat/docker-build-env` 等分支。
+本分支提供 **离线仿真 `mpc_offline_sim`**：在宿主机上直接构建运行，四旋翼动力学在进程内闭环。实机在线版见 `feat/docker-build-env` 等分支。
 
 ## 1. 离线仿真架构
 
 ```
-offline_sim_node.cpp           # 主程序：飞行状态机 + 三频率节拍（与在线版同构）
+offline_sim_node.cpp           # 主程序：飞行状态机 + 三频率节拍
 ├─ 0.5Hz  目标传感器模拟        # 2s 一次观测，含匀速圆周等机动
 ├─ 10Hz   KF 融合/预测 + MPC    # 在线规划 + 到达检测
 └─ 100Hz  控制回路
-     └─ 串级 PID -> AccelToAttitudeController（加速度->姿态+推力，替代 PX4 接口）
+     └─ 串级 PID -> AccelToAttitudeController（加速度->姿态+推力）
         -> drone_dynamic 姿态外环 + 角速度内环 + 混控 -> 四旋翼动力学（100Hz）
 ```
 
-仿真结束弹出 12 个 matplotlib 分析窗口（与在线版共用同一套绘图代码）。
+仿真结束弹出 12 个 matplotlib 分析窗口。
 
 ## 2. 算法模块
 
@@ -48,7 +48,7 @@ bash src/mpc_planning/install.sh
 ## 4. 构建与运行
 
 ```bash
-# 构建（无需 ROS；若环境里有 ROS/catkin，ROS 在线节点也不会被牵连）
+# 构建
 cmake -S src/mpc_planning -B src/mpc_planning/build-native
 cmake --build src/mpc_planning/build-native -j$(nproc)
 
