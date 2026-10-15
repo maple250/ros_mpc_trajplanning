@@ -11,7 +11,7 @@ offline_sim_node.cpp           # 主程序：飞行状态机 + 三频率节拍
 ├─ 0.5Hz  目标传感器模拟        # 2s 一次观测，含匀速圆周等机动
 ├─ 10Hz   KF 融合/预测 + MPC    # 在线规划 + 到达检测
 └─ 100Hz  控制回路
-     └─ 串级 PID -> AccelToAttitudeController（加速度->姿态+推力）
+     └─ 串级 PID -> INDIAttitudeController（加速度->姿态+推力，INDI 增量法）
         -> drone_dynamic 姿态外环 + 角速度内环 + 混控 -> 四旋翼动力学（100Hz）
 ```
 
@@ -28,7 +28,7 @@ offline_sim_node.cpp           # 主程序：飞行状态机 + 三频率节拍
 | `Constraints/` | 状态 / 输入 box 约束（位置 ±2000m，速度 ±25m/s，加速度 ±20m/s²）+ 多面体约束 |
 | `Interfaces/` | 基于 **HPIPM / blasfeo** 的 QP 求解接口 |
 | `controller/` | 串级 PID（位置环 -> 速度环），对 MPC 轨迹做时间插值跟踪 |
-| `InnerLoop/` | 加速度指令 -> 期望姿态 + 总推力的转换器（含倾角限幅） |
+| `INDI/` | 加速度指令 -> 期望姿态 + 总推力的转换器：增量非线性动态逆（INDI，移植自 indi 工程），测量姿态滤波为增量基准，含倾角限幅 |
 | `Plotting/` | matplotlib-cpp 事后绘图（程序退出时自动绘制） |
 
 目标参数、代价权重、约束边界均在 `src/mpc_planning/Params/*.json` 中配置；初始场景见 `Params/stateInitialization.json`。四旋翼动力学参数见 `External/drone_dynamic/Params/drone_params.json`。

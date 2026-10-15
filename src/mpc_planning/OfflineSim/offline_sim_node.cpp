@@ -2,7 +2,7 @@
 // 离线拦截仿真主程序（纯 cmake 构建运行，无外部中间件依赖）
 //
 // 链路：目标模拟(0.5Hz) → KF → MPC(10Hz) → PID(100Hz)
-//       → AccelToAttitudeController（加速度→姿态+推力）
+//       → INDIAttitudeController（加速度→姿态+推力，INDI 增量法）
 //       → drone_dynamic 姿态外环 + 角速度内环 + 混控 → 四旋翼动力学（100Hz）
 //
 // 状态机/三频率节拍/目标机动/logData 日志项同构；退出时经 MPC::logPlot
@@ -26,7 +26,7 @@
 
 #undef gravity  // mpcc config.h 把 gravity 定义为 9.81 宏，会打坏下面的成员访问与形参名
 
-#include "InnerLoop/AccelToAttitudeController.h"
+#include "INDI/INDIAttitudeController.h"
 
 #include "Model/drone_dynamics.h"
 #include "Controller/attitude_controller.h"
@@ -64,9 +64,10 @@ enum class FlightState {
     DONE
 };
 
-//=============== AccelToAttitudeController 自检（三断言） ===============
+//=============== INDIAttitudeController 自检（三断言；控制器有状态，每例独立实例） ===============
 static int runSelfTest(double gravity) {
-    AccelToAttitudeController a2a(gravity);
+    const Eigen::Vector3d hover_meas(0.0, 0.0, gravity); // 悬停比力：水平静止，z 轴 +g
+    const drone_dynamic::EulerAngle level{};             // 测量姿态：水平
     int failed = 0;
     auto report = [](const char *name, bool ok, const AttThrustSp &s) {
         std::cout << "[selftest] " << name << ": attSp=(roll " << s.attSp.roll
@@ -74,20 +75,23 @@ static int runSelfTest(double gravity) {
                   << ") thrust=" << s.thrustSp << " -> " << (ok ? "PASS" : "FAIL") << std::endl;
         return !ok;
     };
-    { // ① a=0 → 水平姿态，推力≈g
-        AttThrustSp s = a2a.update(Eigen::Vector3d::Zero(), 0.0);
+    { // ① a=0 且测量悬停 → 水平姿态，推力≈g
+        INDIAttitudeController indi(gravity);
+        AttThrustSp s = indi.update(Eigen::Vector3d::Zero(), hover_meas, level, 0.0, kCtrlDt);
         bool ok = std::fabs(s.attSp.roll) < 1e-6 && std::fabs(s.attSp.pitch) < 1e-6 &&
                   std::fabs(s.attSp.yaw) < 1e-6 && std::fabs(s.thrustSp - gravity) < 1e-6;
         failed += report("hover(a=0)", ok, s);
     }
-    { // ② 前向加速 → FLU 正 pitch（低头，与 drone_validation attLoop 符号一致），推力>g
-        AttThrustSp s = a2a.update(Eigen::Vector3d(5.0, 0.0, 0.0), 0.0);
-        bool ok = s.attSp.pitch > 0.3 && s.attSp.pitch < 0.7 &&
-                  std::fabs(s.attSp.roll) < 1e-6 && s.thrustSp > gravity;
-        failed += report("fwd(a=5,0,0)", ok, s);
+    { // ② 前向+上行加速 → FLU 正 pitch（低头），Δθ=a_x/g≈0.51rad；推力增量 Δa_z=1 → g+1
+        INDIAttitudeController indi(gravity);
+        AttThrustSp s = indi.update(Eigen::Vector3d(5.0, 0.0, 1.0), hover_meas, level, 0.0, kCtrlDt);
+        bool ok = s.attSp.pitch > 0.45 && s.attSp.pitch < 0.6 &&
+                  std::fabs(s.attSp.roll) < 1e-6 && std::fabs(s.thrustSp - (gravity + INDIParam{}.kp_thrust)) < 1e-6;
+        failed += report("fwd+up(a=5,0,1)", ok, s);
     }
     { // ③ 大水平指令 → 倾角限幅 60° 生效
-        AttThrustSp s = a2a.update(Eigen::Vector3d(100.0, 0.0, 0.0), 0.0);
+        INDIAttitudeController indi(gravity);
+        AttThrustSp s = indi.update(Eigen::Vector3d(100.0, 0.0, 0.0), hover_meas, level, 0.0, kCtrlDt);
         bool ok = std::fabs(s.attSp.pitch - drone_dynamic::degToRad(60.0)) < 1e-3;
         failed += report("tilt-limit(a=100)", ok, s);
     }
@@ -155,7 +159,7 @@ int main(int argc, char** argv) {
     drone_dynamic::AttitudeController att_ctrl(P.attCtrl, P.model.gravity);
     drone_dynamic::RateController rate_ctrl(P.rateCtrl);
     drone_dynamic::Mixer mixer(P.model, P.mixer);
-    AccelToAttitudeController accel2att(P.model.gravity);
+    INDIAttitudeController indi_ctrl(P.model.gravity);
 
     // 窗口8 PWM 参考线：模型物理转速极限（w_min 怠速 / w_max 满转）按离线 PWM 映射换算
     // （PWM = 1000 + 1000·W/w_max_n，与下方电机 PWM 真值换算同轴）
@@ -215,6 +219,14 @@ int main(int argc, char** argv) {
             has_new_target_meas = true;
         }
 
+        // ============ 加速度计模拟测量（每拍，INDI 内环全程需要） ============
+        // 机体系比力（推力+气动阻力等全部非重力外力，质量归一化），经四元数旋转到惯性系(ENU)；比力语义下悬停稳态读数 az≈+g
+        const drone_dynamic::BodyForce acc_b = dyn.getAccelerometer(x);
+        const double acc_b_arr[3] = {acc_b.fx, acc_b.fy, acc_b.fz};
+        double acc_e_arr[3];
+        drone_dynamic::rotateBodyToWorld(x.quat, acc_b_arr, acc_e_arr);
+        last_accel_meas = {acc_e_arr[0], acc_e_arr[1], acc_e_arr[2]};
+
         // ============ 反馈状态更新（TRACKING 阶段） ============
         if (state == FlightState::TRACKING_MPC) {
             ego_fbk.Pos_enu = Eigen::Vector3d(x.pos.x, x.pos.y, x.pos.z);
@@ -223,13 +235,6 @@ int main(int argc, char** argv) {
             ego_fbk.EulerAngles = Eigen::Vector3d(att_meas.roll, att_meas.pitch, att_meas.yaw);
             mpc_ego_state.px = x.pos.x; mpc_ego_state.py = x.pos.y; mpc_ego_state.pz = x.pos.z;
             mpc_ego_state.vx = x.vel.vx; mpc_ego_state.vy = x.vel.vy; mpc_ego_state.vz = x.vel.vz;
-            // 加速度计模拟测量：机体系比力（推力+气动阻力等全部非重力外力，质量归一化）
-            // 经四元数旋转到惯性系(ENU)；比力语义下悬停稳态读数 az≈+g
-            const drone_dynamic::BodyForce acc_b = dyn.getAccelerometer(x);
-            const double acc_b_arr[3] = {acc_b.fx, acc_b.fy, acc_b.fz};
-            double acc_e_arr[3];
-            drone_dynamic::rotateBodyToWorld(x.quat, acc_b_arr, acc_e_arr);
-            last_accel_meas = {acc_e_arr[0], acc_e_arr[1], acc_e_arr[2]};
         }
 
         // ============ 10Hz MPC 宏观规划 ============
@@ -335,13 +340,14 @@ int main(int argc, char** argv) {
             }
         }
 
-        // ============ 内环：加速度→姿态+推力→角速度→混控→动力学（每拍执行） ============
-        const AttThrustSp ats = accel2att.update(a_cmd, yaw_sp);
+        // ============ 内环：加速度→姿态+推力（INDI）→角速度→混控→动力学（每拍执行） ============
         const drone_dynamic::EulerAngle att_meas = dyn.getEuler(x);
+        const Eigen::Vector3d a_meas_enu(last_accel_meas[0], last_accel_meas[1], last_accel_meas[2]);
+        const AttThrustSp ats = indi_ctrl.update(a_cmd, a_meas_enu, att_meas, yaw_sp, kCtrlDt);
         const drone_dynamic::AttitudeOutput ao = att_ctrl.update(ats.attSp, att_meas); // 只取 rateSp；其 thrustSp 为悬停假设，弃用
         double ang_acc[3];
         rate_ctrl.update(ao.rateSp, x.omega, kCtrlDt, ang_acc);
-        const drone_dynamic::MixerOutput mo = mixer.allocate(ats.thrustSp, ang_acc);   // 精确总推力 = ||a_cmd + g·e3||
+        const drone_dynamic::MixerOutput mo = mixer.allocate(ats.thrustSp, ang_acc);   // 总推力 = INDI 增量推力（机体z比力）
         x = dyn.step(x, mo.cmd);
 
         // ============ hover-only 状态打印（1Hz） ============

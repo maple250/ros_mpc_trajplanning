@@ -35,8 +35,8 @@ include_directories(${DRONE_DYNAMIC_DIR})   # 以 <Model/drone_dynamics.h> 等�
 # ==========================================
 add_executable(mpc_offline_sim
         OfflineSim/offline_sim_node.cpp
-        InnerLoop/AccelToAttitudeController.cpp
-        InnerLoop/AccelToAttitudeController.h
+        INDI/INDIAttitudeController.cpp
+        INDI/INDIAttitudeController.h
         KFfilter/KFfilter.cpp
         types.cpp
         Params/params.cpp
